@@ -1,0 +1,17 @@
+{
+    "audio": {
+        "extensions": [".wav", ".mp3", ".flac", ".m4a", ".ogg"],
+        "clipping_threshold": 0.98,
+        "fake_hq_threshold_khz": 16.0,
+        "fuzzy_threshold": 0.85
+    },
+    "ia": {
+        "llm_url": "http://localhost:11434/api/generate",
+        "model_name": "llama2",
+        "min_samples_for_ml": 5
+    },
+    "paths": {
+        "db_name": "audio_expert_v4.db",
+        "export_folder": "./exports"
+    }
+}

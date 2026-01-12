@@ -1,0 +1,22 @@
+{
+    "project_info": {"version": "0.2.4", "edition": "Obsidian Pro", "developer_mode": false},
+    "paths": {
+        "db_path": "database/audio_expert_v01.db",
+        "model_path": "models/audio_expert_rf.joblib",
+        "scaler_path": "models/scaler.pkl",
+        "log_path": "logs/session.log"
+    },
+    "audio": {
+        "sample_duration_sec": 45,
+        "extensions": [".flac", ".wav", ".mp3", ".m4a", ".ogg", ".aac", ".wma"]
+    },
+    "ml_engine": {
+        "initial_weights": {"clipping": 0.3, "snr": 0.2, "crackling": 0.3, "quality": 0.2}
+    },
+    "llm": {
+        "model_name": "qwen2.5",
+        "api_url": "http://localhost:11434/api/generate",
+        "arbitration_zone": {"min_score": 0.4, "max_score": 0.75}
+    }
+}
+

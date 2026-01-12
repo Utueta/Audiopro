@@ -1,0 +1,104 @@
+/* --- Variables de Couleurs (Conceptuelles) ---
+   Background: #0F111A (Obsidian Deep)
+   Surface:    #161925 (Panel Grey)
+   Primary:    #00F2FF (Neon Cyan)
+   Danger:     #FF3D00 (Alert Red)
+   Success:    #76FF03 (Valid Green)
+----------------------------------------------- */
+
+QMainWindow {
+    background-color: #0F111A;
+}
+
+QWidget {
+    color: #E0E0E0;
+    font-family: 'Segoe UI', 'Roboto', sans-serif;
+    font-size: 13px;
+}
+
+/* --- Panneaux et Cadres --- */
+QFrame#ControlPanel {
+    background-color: #161925;
+    border: 1px solid #1E2233;
+    border-radius: 8px;
+}
+
+/* --- Boutons Professionnels --- */
+QPushButton {
+    background-color: #1E2233;
+    border: 1px solid #2A2F45;
+    border-radius: 4px;
+    padding: 8px 15px;
+    color: #00F2FF;
+    font-weight: bold;
+    text-transform: uppercase;
+}
+
+QPushButton:hover {
+    background-color: #00F2FF;
+    color: #0F111A;
+    border: 1px solid #00F2FF;
+}
+
+QPushButton:pressed {
+    background-color: #00B8C2;
+}
+
+QPushButton#BtnMini {
+    border: 1px solid #FF3D00;
+    color: #FF3D00;
+}
+
+QPushButton#BtnMini:hover {
+    background-color: #FF3D00;
+    color: #FFFFFF;
+}
+
+/* --- Table de Résultats (Design Compact) --- */
+QTableWidget {
+    background-color: #161925;
+    alternate-background-color: #1C2030;
+    border: 1px solid #1E2233;
+    gridline-color: #0F111A;
+    border-radius: 5px;
+    selection-background-color: #00F2FF;
+    selection-color: #0F111A;
+}
+
+QHeaderView::section {
+    background-color: #0F111A;
+    color: #888EAB;
+    padding: 8px;
+    border: none;
+    border-bottom: 2px solid #1E2233;
+    font-weight: bold;
+    text-transform: uppercase;
+}
+
+/* --- Barres de Progression --- */
+QProgressBar {
+    border: 1px solid #1E2233;
+    border-radius: 4px;
+    background-color: #050608;
+    text-align: center;
+    font-weight: bold;
+    height: 20px;
+}
+
+QProgressBar::chunk {
+    background-color: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0, 
+                        stop:0 #008C94, stop:1 #00F2FF);
+    border-radius: 3px;
+}
+
+/* --- Labels de Statut --- */
+QLabel#StatusTitle {
+    color: #00F2FF;
+    font-size: 18px;
+    font-weight: bold;
+}
+
+QLabel#MetricValue {
+    font-family: 'Consolas', monospace;
+    color: #76FF03;
+}
