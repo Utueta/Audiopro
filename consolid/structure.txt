@@ -1,0 +1,32 @@
+Audiopro/
+├── core/                       # Cœur logique du système
+│   ├── analyzer/               # Analyseurs techniques
+│   │   ├── dsp.py              # Signal pur (RMS, Phase, Clipping)
+│   │   ├── spectral.py         # Analyse fréquentielle (Cutoff, Segments)
+│   │   └── metadata.py         # Extraction bitrate/format (Mutagen)
+│   ├── brain/                  # Intelligence Artificielle (ML)
+│   │   ├── model.py            # Logique d'inférence Random Forest
+│   │   └── weights/            # Fichiers de modèles entraînés (.pkl)
+│   └── manager.py              # Chef d'orchestre & Cache SQL
+├── services/                   # Micro-services et APIs
+│   └── llm_service.py          # Interface Ollama / Qwen 2.5
+├── ui/                         # Interface Utilisateur
+│   ├── view.py                 # Fenêtre principale et graphiques
+│   └── components/             # Widgets personnalisés (boutons, barres)
+├── database/                   # Stockage des données (SQLite)
+│   └── inventory.db
+├── logs/                       # [AJOUTÉ] Traces d'exécution et erreurs
+│   ├── analysis.log            # Logs des scans audio
+│   └── system.log              # Logs des erreurs critiques et LLM
+├── assets/                     # Ressources graphiques (Icônes, Logos)
+├── tests/                      # Suite de tests unitaires
+├── app.py                      # Point d'entrée principal
+├── config.json                 # Configuration globale
+├── install_system_deps.sh      # Script d'installation OS (Fedora/Debian)
+├── smi.sh                      # Monitoring ressources (CPU/RAM)
+├── Tuto.md                     # Manuel d'utilisateur
+├── Release Note.md             # Historique des versions
+├── readme.md                   # Documentation d'accueil
+├── rapport final de certification.md 
+├── requirements.txt            # Dépendances Python
+└── .gitignore                  # Protection (exclut logs/ et database/)
