@@ -1,0 +1,30 @@
+{
+  "paths": {
+    "db_name": "audio_history.db",
+    "log_file": "analysis.log",
+    "model_save_path": "trained_model.pkl"
+  },
+  "audio": {
+    "extensions": [".wav", ".mp3", ".flac", ".wma", ".aac", ".ogg", ".m4a"],
+    "sample_rate": 44100,
+    "max_duration_scan": 45
+  },
+  "ml_weights": {
+    "w1_clipping": 45.0,
+    "w2_snr": 2.5,
+    "w3_crackling": 15.0,
+    "w4_quality": 0.8
+  },
+  "analysis_thresholds": {
+    "clipping_threshold": 0.98,
+    "snr_min_db": 18.0,
+    "fake_hq_threshold_khz": 16.0,
+    "gray_zone_low": 35.0,
+    "gray_zone_high": 75.0
+  },
+  "ia": {
+    "llm_url": "http://localhost:11434/api/generate",
+    "model_name": "qwen2.5:7b-instruct-q4_K_M",
+    "top_n_default": 10
+  }
+}

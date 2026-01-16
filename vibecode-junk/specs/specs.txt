@@ -1,0 +1,635 @@
+Spécifications du Système d'Analyse Audio 1. Architecture et Modèle ML Modèle Random Forest : Apprentissage à partir de audio_files étiquetés ("Bon" vs "Défectueux"). Cold Start : Utilisation d'une formule pondérée si peu de données sont disponibles. Apprentissage Incrémental Automatique : À chaque validation d'un fichier, le modèle se réentraîne en arrière-plan. 2. Gestion des Fichiers Doublons et Fichiers Corrompus : Utilisation de BLAKE2b pour identifier les doublons. Les fichiers de 0 Ko ou illisibles sont marqués comme "Défectueux" et "ban". Fuzzy Matching : Détection de doublons avec des noms similaires (ex: "Musique.mp3" vs "Musique_copy.mp3"). 3. Interface Utilisateur Pygame et Visualisation : Intégration d'une vue de la forme d'onde (Waveform) avec un indicateur de défaut. Actions de révision : [E]couter, [D]éfectueux, [B]on, [S]auter. Dashboard : Statistiques en temps réel montrant la santé de la collection audio. 4. Pipeline LLM Arbitrage Contextuel : Envoi de métriques et tendances au LLM pour un jugement plus "humain". Logs Asynchrones : Console intégrée affichant les étapes d'analyse sans ralentir l'interface. 5. Sécurité et Gestion des Ressources Injection SQL : Utilisation de paramètres pour éviter les injections. Ne jamais injecter dynamiquement des noms de tables ou colonnes. Gestion des Ressources Qt : Libération correcte des instances de QMediaPlayer et des threads à la fermeture de l'application. Corbeille pour Suppression : Utilisation de send2trash pour la suppression sécurisée des fichiers. 6. Analyse Technique Critères d'Évaluation : Saturation (Clipping), rapport signal/bruit (SNR), détection de pics, analyse spectrale. Détection "Fake HQ" : Analyse de la coupure de fréquence pour identifier les fichiers compressés frauduleusement. 7. Optimisation et Performance Chargement Sélectif avec Librosa : Lecture par segments pour éviter la saturation de la RAM. Système de Cache : Stockage des hash des fichiers analysés pour éviter les analyses redondantes. 8. Configuration et Maintenabilité Fichier de Configuration : Utilisation de config.yaml ou .env pour remplacer les constantes. Typage Statique : Utilisation de "Type Hints" pour faciliter la maintenance. 9. Statistiques et Reporting Statistiques de Bannissement : Rapport sur les raisons d'exclusion des fichiers, exporté en JSON à la fin de l'exécution. Graphiques de Distribution : Affichage des scores de qualité à la fin du traitement. 10. Fuzzy Matching et Précision Comparaison Efficace : Utilisation de la distance de Levenshtein pour comparer les noms et des métadonnées via Mutagen. Interface Visuelle : Groupement des doublons par raison (hash, similarité de nom, etc.). Fake HQ : Au lieu d'utiliser une valeur fixe, le code calculera si l'énergie chute avant les 16.0 kHz définis dans ton fichier. Si c'est le cas, le score baissera, signalant un fichier probablement converti depuis un MP3 de basse qualité. view.py qui intègre la navigation par onglets, l'optimisation Matplotlib et l'affichage des données Mutagen. vue complète ? Tab_Analysis : Elle contient uniquement le bouton de lancement, la barre de progression et le journal. Cela permet de surveiller la charge de ton i7 et de ta Quadro sans être distrait par les données. Tab_Results : Elle affiche les données extraites par Mutagen (Artiste, Titre, Bitrate). C'est ici que tu peux trier par score pour voir tes fichiers les plus critiques. Tab_Revision : C'est le cœur de l'expertise. En cliquant sur une ligne du tableau (via le contrôleur), la Waveform se met à jour instantanément sans recréer d'objet graphique. Tab_Duplicates : (À connecter au contrôleur) Elle utilisera le fuzzy_threshold de ton config.json pour lister les fichiers dont les noms sont suspects. Dans la fonction run_scanUtiliser le ScanWorker (le QThread que nous avons conçu) pour déporter ce travail. 1. Architecture du Système Le logiciel repose sur une architecture asynchrone pilotée par événements, garantissant une interface fluide même lors de calculs lourds sur GPU/CPU. Composants Clés : Contrôleur (app.py) : Orchestre les échanges entre la vue et les services. Gère le cycle de vie des threads (ScanWorker, LLMService). Moteur d'Analyse (analyzer.py) : Décode les flux via FFmpeg. Extrait le SNR par calcul de silence relatif (Noise Floor) et détecte les "Faux HQ" par Roll-off fréquentiel. Service IA (services/llm_service.py) : Interface REST avec Ollama. Utilise Qwen2.5 pour arbitrer les fichiers situés dans la "Zone Grise" (score 40-70). Modèle de Données (model.py) : Persistance SQLite 3 sécurisée par une file d'attente (thread-safe). 2. Capacités de Détection & Analyse Le système évalue la qualité audio sur une échelle de 0 à 100 basée sur 4 piliers : Métrique Seuil Config Méthode Technique Saturation clipping_threshold Comptage des échantillons ≥ 0.98 FS. Bruit de Fond snr_min_db Calcul du SNR basé sur le 10ème percentile RMS. Faux HQ fake_hq_threshold Analyse du Spectral Roll-off à 95% d'énergie. Métadonnées N/A Extraction via Mutagen (Artiste, Titre, Bitrate réel). 3. Optimisations V4.1 Spécifiques Zéro Blocage UI : Déplacement de la boucle de scan dans un QThread avec signaux de progression. Fluidité Graphique : Réutilisation des objets Matplotlib (draw_idle) pour éviter les fuites mémoire et les micro-saccades. Arbitrage Intelligent : Le LLM n'est sollicité que pour améliorer l'apprentissage du ML sur les cas ambigus, économisant la VRAM (Quadro P3200). Fuzzy Matching : Pré-calcul des similarités de noms de fichiers pour la gestion des doublons. Analyzer.py (Calcul du SNR) Ajoute un petit max(..., 1e-9) pour sécuriser le calcul du logarithme. pour éviter un NaN (Not a Number) ou une erreur de division. app.py (Gestion des lignes du tableau) vérifier que l'index des colonnes dans update_ui correspond bien aux headers de view.py. model.py (Bitrate Mutagen) utilise une valeur par défaut dans l'insertion SQL : item['meta'].get('bitrate', 0). 1. Intégration du Score de Suspicion ML (analyzer.py) Votre formule spécifique doit être intégrée pour le "Cold Start" (démarrage à froid) : suspicion_score=w1⋅Clipping+w2⋅(15−SNR)+w3⋅Crackling+w4⋅(60−Quality) 2. Logique de Filtrage et Sélection (app.py) Il faut ajouter une fenêtre de dialogue au lancement pour demander les Options 1 à 4 et respecter la variable file_count. 3. Pipeline LLM avec Format Strict (services/llm_service.py) Pipeline ML/LLM Hybride : Le score continu [0−1] calculé par l'analyseur est utilisé pour entraîner un RandomForestRegressor. Ce score est injecté dans un tableau JSON envoyé au LLM. Apprentissage Incrémental : Chaque validation utilisateur dans l'onglet "Révision" déclenche un ré-entraînement automatique du modèle local. Triage Hiérarchique : Les fichiers bannis (0kb, erreur) sont traités en priorité haute et exclus de l'analyse coûteuse. Format Strict : Le LLM agit comme un parseur de données (output formaté pour réintégration automatique dans l'UI). fonction de détection de doublons par Hash128 et taille pour compléter l'onglet "Doublons" Gestion des Doublons Algorithme : Comparaison hiérarchique : Taille exacte (Filtre rapide). Hash Blake2b 128-bit (Signature numérique). Fuzzy Match sur le nom si les deux premiers échouent mais que le score de suspicion est identique. Statistiques : Le système calcule l'espace disque gaspillé et le ratio de doublons par type de codec. Sécurité : Les doublons ne sont jamais supprimés directement mais marqués avec le tag duplicate_of: [path] dans audio_history.db. Mémoire Explicite : Vos décisions [B]on / [D]éfectueux réentraînent le Random Forest en temps réel. Modifier analyzer.py pour retourner l'index temporel du pic de clipping maximum : timestamp=srargmax(∣y∣)​
+
+1. Architecture et Analyse Audio (Cœur du système)
+✔ Architecture asynchrone pilotée par événements (Qt + QThread)
+
+Pourquoi c’est essentiel
+
+Garantit une UI totalement fluide, même lors de scans lourds (CPU/GPU).
+
+Séparation claire des responsabilités : UI ≠ calcul.
+
+Évolutif et professionnel (niveau logiciel industriel).
+
+👉 Sans cela, l’application devient inutilisable sur de grosses bibliothèques audio.
+
+✔ Moteur d’analyse audio déterministe (analyzer.py)
+
+Critères retenus
+
+Clipping (saturation)
+
+SNR basé sur noise floor réel
+
+Analyse spectrale (Spectral Roll-off 95 %)
+
+Détection Fake HQ (chute d’énergie avant 16 kHz)
+
+Pourquoi c’est un excellent choix
+
+Basé sur des signaux physiques mesurables, pas du “ressenti”.
+
+Résultats explicables (important pour confiance utilisateur).
+
+La détection Fake HQ par roll-off dynamique est bien supérieure à un seuil fixe.
+
+2. Pipeline ML / LLM (Intelligence sans excès)
+✔ Pipeline hybride ML + LLM
+
+Principe
+
+L’analyseur produit un score continu.
+
+Le RandomForest apprend à partir des validations utilisateur.
+
+Le LLM n’intervient que dans la zone grise (ex : score 40–70).
+
+Pourquoi c’est excellent
+
+Le ML est rapide, local et stable.
+
+Le LLM apporte une expertise contextuelle sans surcoût massif.
+
+Économie de VRAM (très pertinent avec une Quadro P3200).
+
+👉 C’est une approche mature, loin du “tout LLM”.
+
+✔ Apprentissage incrémental en temps réel
+
+Pourquoi c’est stratégique
+
+Le système s’améliore réellement avec l’usage.
+
+Chaque décision [Bon / Défectueux] a une valeur immédiate.
+
+Très forte valeur perçue utilisateur (“le logiciel me comprend”).
+
+3. Gestion des doublons (Impact direct sur l’espace disque)
+✔ Détection hiérarchique des doublons
+
+Pipeline retenu
+
+Taille exacte (filtre ultra-rapide)
+
+Hash BLAKE2b 128-bit
+
+Fuzzy matching (Levenshtein) + métadonnées
+
+Pourquoi c’est optimal
+
+Performant (évite les comparaisons inutiles).
+
+Très fiable (hash fort).
+
+Le fuzzy matching n’est utilisé qu’en dernier recours, intelligemment.
+
+✔ Suppression sécurisée (send2trash + marquage DB)
+
+Pourquoi c’est indispensable
+
+Aucune suppression destructive.
+
+Traçabilité complète via SQLite.
+
+Conforme aux bonnes pratiques de logiciels professionnels.
+
+4. Interface Utilisateur (Expertise et efficacité)
+✔ Séparation claire par onglets (Analysis / Results / Revision / Duplicates)
+
+Pourquoi c’est une très bonne conception
+
+Charge cognitive réduite.
+
+Chaque onglet a un objectif clair.
+
+L’onglet Revision devient un véritable poste d’expertise audio.
+
+✔ Réutilisation des objets Matplotlib (draw_idle)
+
+Pourquoi c’est crucial
+
+Évite les fuites mémoire.
+
+Fluidité parfaite lors de la navigation.
+
+Comportement stable sur longues sessions.
+
+5. Performance et Robustesse
+✔ Chargement audio par segments (Librosa)
+
+Pourquoi c’est indispensable
+
+Permet de traiter des milliers de fichiers.
+
+Évite toute saturation RAM.
+
+Compatible avec machines modestes.
+
+✔ Système de cache (hash des fichiers analysés)
+
+Pourquoi c’est intelligent
+
+Aucun recalcul inutile.
+
+Gain de temps massif sur rescans.
+
+Réduction de la consommation énergétique.
+
+6. Sécurité et Maintenabilité (Non négociable)
+✔ SQLite thread-safe + requêtes paramétrées
+
+Pourquoi c’est fondamental
+
+Aucune corruption de données.
+
+Protection contre injections SQL.
+
+Stabilité sur long terme.
+
+✔ Configuration externalisée (config.yaml / .env)
+
+Pourquoi c’est professionnel
+
+Aucun “magic number” dans le code.
+
+Facilité de réglage et de tests.
+
+Prérequis pour toute évolution future.
+
+7. Améliorations techniques ciblées (Très bon niveau)
+✔ Sécurisation des calculs numériques
+
+max(..., 1e-9) pour éviter NaN
+
+Valeurs par défaut Mutagen (bitrate)
+
+Pourquoi c’est important
+
+Évite des bugs silencieux extrêmement difficiles à tracer.
+
+Indispensable pour un moteur d’analyse fiable.
+
+✔ Timestamp du clipping maximum
+
+Pourquoi c’est excellent
+
+Permet une révision humaine rapide et précise.
+
+Transforme une métrique abstraite en information exploitable.
+
+Conclusion – Vision globale
+
+👉 Le système retenu est :
+
+Scientifiquement fondé
+
+Performant à grande échelle
+
+Évolutif
+
+Orienté expertise humaine
+
+Réellement intelligent, pas marketing
+
+1. Architecture et Analyse Audio (Cœur du système) ✔ Architecture asynchrone pilotée par événements (Qt + QThread) Pourquoi c’est essentiel Garantit une UI totalement fluide, même lors de scans lourds (CPU/GPU). Séparation claire des responsabilités : UI ≠ calcul. Évolutif et professionnel (niveau logiciel industriel). 👉 Sans cela, l’application devient inutilisable sur de grosses bibliothèques audio. ✔ Moteur d’analyse audio déterministe (analyzer.py) Critères retenus Clipping (saturation) SNR basé sur noise floor réel Analyse spectrale (Spectral Roll-off 95 %) Détection Fake HQ (chute d’énergie avant 16 kHz) Pourquoi c’est un excellent choix Basé sur des signaux physiques mesurables, pas du “ressenti”. Résultats explicables (important pour confiance utilisateur). La détection Fake HQ par roll-off dynamique est bien supérieure à un seuil fixe. 2. Pipeline ML / LLM (Intelligence sans excès) ✔ Pipeline hybride ML + LLM Principe L’analyseur produit un score continu. Le RandomForest apprend à partir des validations utilisateur. Le LLM n’intervient que dans la zone grise (ex : score 40–70). Pourquoi c’est excellent Le ML est rapide, local et stable. Le LLM apporte une expertise contextuelle sans surcoût massif. Économie de VRAM (très pertinent avec une Quadro P3200). 👉 C’est une approche mature, loin du “tout LLM”. ✔ Apprentissage incrémental en temps réel Pourquoi c’est stratégique Le système s’améliore réellement avec l’usage. Chaque décision [Bon / Défectueux] a une valeur immédiate. Très forte valeur perçue utilisateur (“le logiciel me comprend”). 3. Gestion des doublons (Impact direct sur l’espace disque) ✔ Détection hiérarchique des doublons Pipeline retenu Taille exacte (filtre ultra-rapide) Hash BLAKE2b 128-bit Fuzzy matching (Levenshtein) + métadonnées Pourquoi c’est optimal Performant (évite les comparaisons inutiles). Très fiable (hash fort). Le fuzzy matching n’est utilisé qu’en dernier recours, intelligemment. ✔ Suppression sécurisée (send2trash + marquage DB) Pourquoi c’est indispensable Aucune suppression destructive. Traçabilité complète via SQLite. Conforme aux bonnes pratiques de logiciels professionnels. 4. Interface Utilisateur (Expertise et efficacité) ✔ Séparation claire par onglets (Analysis / Results / Revision / Duplicates) Pourquoi c’est une très bonne conception Charge cognitive réduite. Chaque onglet a un objectif clair. L’onglet Revision devient un véritable poste d’expertise audio. ✔ Réutilisation des objets Matplotlib (draw_idle) Pourquoi c’est crucial Évite les fuites mémoire. Fluidité parfaite lors de la navigation. Comportement stable sur longues sessions. 5. Performance et Robustesse ✔ Chargement audio par segments (Librosa) Pourquoi c’est indispensable Permet de traiter des milliers de fichiers. Évite toute saturation RAM. Compatible avec machines modestes. ✔ Système de cache (hash des fichiers analysés) Pourquoi c’est intelligent Aucun recalcul inutile. Gain de temps massif sur rescans. Réduction de la consommation énergétique. 6. Sécurité et Maintenabilité (Non négociable) ✔ SQLite thread-safe + requêtes paramétrées Pourquoi c’est fondamental Aucune corruption de données. Protection contre injections SQL. Stabilité sur long terme. ✔ Configuration externalisée (config.yaml / .env) Pourquoi c’est professionnel Aucun “magic number” dans le code. Facilité de réglage et de tests. Prérequis pour toute évolution future. 7. Améliorations techniques ciblées (Très bon niveau) ✔ Sécurisation des calculs numériques max(..., 1e-9) pour éviter NaN Valeurs par défaut Mutagen (bitrate) Pourquoi c’est important Évite des bugs silencieux extrêmement difficiles à tracer. Indispensable pour un moteur d’analyse fiable. ✔ Timestamp du clipping maximum Pourquoi c’est excellent Permet une révision humaine rapide et précise. Transforme une métrique abstraite en information exploitable. fonction de détection de doublons par Hash128 et taille pour compléter l'onglet "Doublons" Gestion des Doublons Algorithme : Comparaison hiérarchique : Taille exacte (Filtre rapide). Hash Blake2b 128-bit (Signature numérique). Fuzzy Match sur le nom si les deux premiers échouent mais que le score de suspicion est identique. Statistiques : Le système calcule l'espace disque gaspillé et le ratio de doublons par type de codec. Sécurité : Les doublons ne sont jamais supprimés directement mais marqués avec le tag duplicate_of: [path] dans audio_history.db. Mémoire Explicite : Vos décisions [B]on / [D]éfectueux réentraînent le Random Forest en temps réel. Modifier analyzer.py pour retourner l'index temporel du pic de clipping maximum : timestamp=srargmax(∣y∣)​2. Seuils Dynamiques basés sur l'Historique Problème : Le ML s'entraîne, mais les seuils de détection (ex: snr_min_db) restent statiques dans le fichier JSON. Solution : Ajouter une fonction dans model.py qui calcule le percentile 90 de l'historique pour ajuster les alertes. 3. Logique "Good" vs "Ban" vs "Tags" Problème : Le code actuel traite tout ce qu'il trouve dans le dossier sans vérifier si le fichier est déjà marqué "Bon" ou "Ban" dans la base SQL avant de lancer l'analyse coûteuse (FFmpeg/Librosa). Solution : Ajouter un "Pre-Scan" qui interroge audio_history.db avant d'ajouter le fichier à la file d'attente. Timestamp Précis : L'analyseur identifie l'échantillon le plus saturé ou bruité et le convertit en secondes. Player "Seek" : Le bouton "Écouter l'erreur" lance la lecture 2 secondes avant l'anomalie pour un diagnostic immédiat. Filtrage par Tags : Les fichiers "Ban" sont totalement invisibles pour les scans futurs. Les fichiers "Bon" ne sont ré-analysés que sur demande explicite (Option 4). Seuils Dynamiques : Bien que codés en dur dans le JSON par défaut, la structure SQL permet maintenant au ML de pondérer les scores selon l'historique de vos validations. 1. Intelligence Artificielle et ML (model.py) Mise en cache du modèle : Votre code utilise joblib pour sauvegarder (trained_model.pkl) et charger le modèle. Dans ma version, le modèle était perdu à chaque fermeture de l'application. Prédiction proactive : Votre predict_suspicion utilise les 4 métriques (score, snr, clipping, crackling) pour ajuster le score avant même l'intervention du LLM. Seuils Dynamiques : Votre code calcule de vrais percentiles (P25, P50, P75, P90) basés sur la distribution réelle de votre base SQLite, ce qui permet d'adapter la sensibilité de détection à votre collection spécifique. 2. Analyse Signal et Détection (analyzer.py) Détection fine des Timestamps : Votre implémentation de _detect_defect_timestamps est très pertinente : elle groupe les échantillons saturés pour ne pas créer 1000 alertes pour un seul "clic" et utilise l'écart-type (np.std) pour détecter les craquements anormaux. Hash Optimisé : Votre méthode de hash ne lit que le début et la fin des gros fichiers. C'est indispensable pour la performance sur des fichiers FLAC ou WAV de plusieurs centaines de Mo. 3. Logique Applicative (app.py) Gestion des doublons multi-critères : Votre version compare par Hash, mais aussi par Nom et par Tags (Artiste/Titre), ce qui est bien plus complet pour le nettoyage de bibliothèque. Feedback Visuel : L'utilisation de QProgressDialog et la coloration des lignes en rouge dans le tableau pour les fichiers bannis rendent l'outil utilisable professionnellement. Intégration Audio : L'utilisation de pygame pour la lecture avec un paramètre start=start_time permet d'écouter directement l'erreur sans chercher manuellement dans le fichier. 4. Pipeline LLM (services/llm_service.py & app.py) Stratégie de Fallback : Votre code prévoit une solution de secours (fallback) si le LLM local (Ollama) est éteint, en utilisant le tri ML par défaut. Cela évite que l'application ne plante si l'IA ne répond pas. 5. Calcul du Score Global : Assurez-vous que les poids (w1, w2, etc.) dans votre config.json sont bien calibrés, car le RandomForest dépendra entièrement de la pertinence de ces calculs initiaux pour son propre apprentissage. Fiabilité temporelle : Le player utilise les defect_timestamps générés par analyzer.py pour un diagnostic instantané. Filtrage Intelligent : Si un fichier est taggué "Ban", il est définitivement ignoré par le moteur de scan pour économiser le CPU. Persistance : Le modèle ML n'est plus "volatil", il se charge au démarrage pour utiliser vos sessions passées de révision. Application de la fusion dans analyzer.py Le code intègre la logique de pondération précise pour le score de suspicion : Poids Externes : Le script récupère self.w = config['ml_weights'] pour ne pas avoir de valeurs "en dur" (hardcoded), permettant une calibration fine via le JSON sans toucher au code. Formule Hiérarchique : Le score est calculé selon l'équation combinant le clipping, le SNR, le craquement et la qualité de base : suspicion=(w1​⋅clipping)+(w2​⋅max(0,15−snr))+(w3​⋅crackling)+(w4​⋅max(0,60−quality_base)) Normalisation : Le résultat est bridé entre 0.0 et 1.0 (suspicion_norm), fournissant une donnée propre et standardisée pour l'entraînement du modèle RandomForestRegressor dans model.py. Impact sur le Machine Learning Cette méthode de calcul est cruciale car : Amorçage (Cold Start) : Avant que vous n'ayez marqué assez de fichiers ("Bon" ou "Ban"), c'est cette formule qui guide le triage initial. Qualité des Features : Le RandomForest utilise ce score comme l'une de ses colonnes de données principales (X = df[['score', ...]]) pour prédire la probabilité de défectuosité. Si cette formule est pertinente, le modèle convergera beaucoup plus vite vers vos préférences personnelles. app.py 1. Gestion Audio Native et Précise Utilise QMediaPlayer et QAudioOutput (PySide6 natif). Cela permet une intégration fluide avec l'interface graphique et, surtout, l'utilisation de self.player.setPosition(int(start_ms)). 2. Automatisation du Pipeline Le pipeline est entièrement automatisé. Après l'analyse, le LLM est lancé, puis l'application bascule d'elle-même sur l'onglet Révision (self.view.tabs.setCurrentIndex(1)). 3. Intelligence et Apprentissage (ML) Elle utilise model.get_dynamic_thresholds() dès le démarrage pour informer l'utilisateur de la sensibilité actuelle du système. 4. Robustesse du Filtrage Elle implémente une logique d'exclusion stricte. L'option 3 ("Réanalyse Bon mais JAMAIS les Ban") est cruciale : elle permet d'améliorer la base de données sans perdre de temps sur les fichiers que vous avez déjà définitivement exclus (fichiers corrompus ou 0kb). 1. Structure Logicielle et Fusion (app.py) Le fichier app.py remplit parfaitement son rôle de contrôleur fusionné : Player Audio Précis : Il abandonne pygame au profit de PySide6.QtMultimedia. L'utilisation de self.player.setPosition(int(start_ms)) couplée aux defect_timestamps permet d'écouter les erreurs exactement là où elles se produisent. Pipeline Automatisé : La transition entre le scan, l'analyse ML, l'arbitrage LLM et l'onglet de révision est fluide et gérée par des signaux Qt. Filtrage Intelligent : La logique d'exclusion des fichiers déjà marqués ("Ban") est intégrée, évitant de scanner inutilement des fichiers corrompus lors des sessions futures. 2. Algorithmique et Analyse (analyzer.py) La recommandation sur le Score Global a été appliquée avec succès : Formule Pondérée : Le score de suspicion est calculé de manière hiérarchique en utilisant les poids (w1 à w4) définis dans votre config.json. Détection Temporelle : La méthode _detect_defect_timestamps identifie précisément les pics de clipping et de craquement. Empreinte Numérique : L'implémentation du Hash Blake2b (128 bits) sur des segments du fichier assure une détection de doublons extrêmement rapide, même sur de gros volumes. 3. Machine Learning et Persistance (model.py) Le modèle assure la continuité de l'apprentissage : Random Forest Persistant : Le modèle est sauvegardé dans trained_model.pkl et rechargé au démarrage. Seuils Dynamiques : Il calcule des percentiles (P90, P75, etc.) basés sur votre historique réel, permettant au logiciel de s'adapter à la qualité moyenne de votre propre bibliothèque. 4. Interface Utilisateur (view.py) Toutes les spécifications visuelles sont présentes : Onglet Doublons : Cet onglet n'est plus vide ; il contient désormais le tableau de comparaison, les statistiques de doublons et le bouton de nettoyage massif. Waveform Interactive : L'intégration de Matplotlib permet de visualiser le signal avec une ligne rouge verticale indiquant l'emplacement exact de l'anomalie détectée. 5. Configuration et Déploiement (config.json, install_*) config.json : Fournit tous les leviers de réglage (poids ML, seuils d'analyse, paramètres LLM) sans nécessiter de modification du code source. Scripts d'installation : Les fichiers install_system_deps.sh et install_python_deps.py couvrent l'intégralité des dépendances nécessaires (ffmpeg, librosa, PySide6, scikit-learn, etc.). 1. Optimisation de l'Analyse Spectrale (analyzer.py) Ajouter : Détection du "Fake HQ" (Upscaling) : Analyser si l'énergie s'effondre brutalement au-delà de 16 kHz, ce qui trahit souvent un fichier MP3 bas débit converti artificiellement en FLAC. Analyse de Corrélation de Phase : Pour détecter les fichiers Mono encodés en "Joint Stereo" ou les problèmes d'inversion de phase qui détériorent l'image stéréo. 2. Raffinement du Machine Learning (model.py) Feature Engineering : Intégrer la "variance spectrale" et le "ZCR" (Zero Crossing Rate) dans les colonnes X du RandomForest pour mieux distinguer les craquements vinyles du bruit blanc. 3. Évolutions de l'Interface (view.py & app.py) Spectrogramme en Temps Réel : Remplacer ou compléter la waveform par un spectrogramme coloré. C'est l'outil ultime pour voir visuellement la coupure des hautes fréquences (Fake HQ) ou les pics de bruit. Multithreading du Scan : Actuellement, le scan semble séquentiel dans la boucle for de run_pipeline. L'utilisation d'un QThreadPool permettrait d'analyser 4 à 8 fichiers simultanément, divisant le temps de scan par 4 sur les processeurs modernes. 4. Automatisation du Nettoyage (Onglet Doublons) Logique de "Garde du meilleur" : Dans l'onglet doublons, ajouter une fonction "Auto-Select" qui compare les bitrates et les scores de suspicion entre deux fichiers identiques pour suggérer automatiquement lequel supprimer. Intégration de send2trash : Bien que listé dans le README, assurez-vous de l'appeler explicitement lors de la suppression massive pour offrir un filet de sécurité à l'utilisateur. Multi-paramètres ML : Le modèle apprend maintenant sur 5 critères au lieu de 4 (ajout du Fake HQ et de la Phase). Performance Stable : Le _worker asynchrone est de retour, ton interface ne figera plus pendant les scans massifs. Tags et Historique : Les métadonnées (Artiste, Titre) et les timestamps d'erreurs sont à nouveau sauvegardés. Auto-Apprentissage : La fonction retrain() est active et se déclenche à chaque décision que tu prends. 1. analyzer.py (Moteur d'Analyse V4.1) Ce fichier gère désormais la détection du Fake HQ et de la Phase, tout en extrayant les métadonnées pour la base de données. 2. model.py (Moteur Intelligent Fusionné) Rétablissement du Thread DB, du réentraînement et des seuils dynamiques, avec les nouvelles colonnes de données. 3. app.py (Contrôleur Multithreadé V4.1) Ce fichier pilote maintenant le ThreadPool pour le scan et le nettoyage intelligent des doublons. 4. view.py Double Graphique : Tu as maintenant la Waveform en haut (pour voir les pics de clipping) et le Spectrogramme en bas (pour voir si les hautes fréquences sont absentes, trahissant un "Fake HQ"). Gestion des Logs : La zone de texte en bas du scan est restaurée pour suivre les décisions de l'IA en temps réel. Interface de Décision : Les boutons "Valider" et "Rejeter" sont câblés pour envoyer les données au model.retrain() via le contrôleur. Organisation Scannable : Les onglets sont clairement séparés pour permettre un workflow fluide : Scan -> Analyse visuelle -> Nettoyage des doublons.
+
+1. Architecture logicielle
+
+Architecture asynchrone événementielle (Qt + QThread / QThreadPool)
+
+Séparation stricte UI / Calcul / Données
+
+Orchestration centralisée via contrôleur (app.py)
+
+2. Moteur d’analyse audio (analyzer.py)
+
+Analyse déterministe basée sur métriques physiques
+
+Détection du clipping (≥ 0.98 FS)
+
+Calcul du SNR via noise floor (percentile RMS)
+
+Analyse spectrale (Spectral Roll-off 95 %)
+
+Détection Fake HQ (chute d’énergie > 16 kHz)
+
+Détection temporelle des défauts (timestamps)
+
+Regroupement intelligent des défauts (anti-spam d’alertes)
+
+Sécurisation numérique (max(..., 1e-9))
+
+3. Score de suspicion (Cold Start)
+
+Formule pondérée hiérarchique configurable
+
+Poids externes (config.json)
+
+Normalisation du score [0.0 – 1.0]
+
+Intégration du score comme feature principale ML
+
+4. Machine Learning (model.py)
+
+RandomForest persistant (joblib)
+
+Apprentissage incrémental en temps réel
+
+Réentraînement automatique à chaque décision utilisateur
+
+Prédiction proactive avant intervention LLM
+
+Seuils dynamiques basés sur percentiles historiques (P50, P75, P90)
+
+Base SQLite thread-safe
+
+5. Pipeline LLM
+
+Intervention limitée à la zone grise
+
+Format de sortie strict et exploitable automatiquement
+
+Fallback ML si LLM indisponible
+
+Intégration non bloquante (asynchrone)
+
+6. Gestion intelligente des fichiers
+
+Pre-scan SQL (Good / Ban / Tags)
+
+Exclusion définitive des fichiers Ban
+
+Réanalyse des fichiers Good uniquement sur demande explicite
+
+Historique et décisions persistés
+
+7. Gestion des doublons
+
+Comparaison hiérarchique :
+
+Taille exacte
+
+Hash Blake2b 128-bit
+
+Fuzzy match (Levenshtein + métadonnées)
+
+Marquage des doublons en base (pas de suppression directe)
+
+Statistiques d’espace disque et codecs
+
+Nettoyage sécurisé via send2trash
+
+8. Interface utilisateur (view.py)
+
+Organisation par onglets (Scan / Results / Revision / Duplicates)
+
+Waveform interactive (Matplotlib réutilisé)
+
+Spectrogramme complémentaire
+
+Indication visuelle des anomalies (ligne temporelle)
+
+Journal temps réel des décisions IA
+
+9. Révision audio experte
+
+Timestamps précis des anomalies
+
+Lecture audio avec seek automatique avant défaut
+
+Validation Bon / Défectueux connectée au ML
+
+Coloration visuelle des statuts
+
+10. Performance et robustesse
+
+Chargement audio par segments (Librosa)
+
+Cache par hash des fichiers analysés
+
+Hash optimisé (début + fin des gros fichiers)
+
+Multithreading du scan (ThreadPool)
+
+11. Configuration et déploiement
+
+Configuration externalisée (config.json, .env)
+
+Poids ML et seuils ajustables sans modification du code
+
+Scripts d’installation système et Python
+
+Dépendances centralisées et reproductibles
+
+
+
+1. Moteur d'Analyse Avancé (analyzer.py) Ce module est le capteur de données brutes. Il doit transformer un signal temporel en métriques exploitables. Extraction de Features (DSP) : Détection du "Fake HQ" (Roll-off) : Utilisation de la Transformée de Fourier Rapide (FFT) pour identifier la fréquence de coupure. Si 95 % de l'énergie spectrale s'arrête en dessous de 16.5 kHz pour un fichier échantillonné à 44.1 kHz, le fichier est marqué comme suspicion d'upsampling. Analyse de Phase : Calcul de la corrélation entre les canaux Gauche et Droite. Une corrélation proche de -1 indique une inversion de phase (problème matériel/câblage). Une corrélation de 1 constante indique un fichier Mono "déguisé" en Stéréo. Algorithme SNR (Noise Floor) : Segmentation du fichier en blocs de 100ms. Identification du bloc ayant l'énergie RMS la plus basse pour définir le bruit de fond, puis calcul du ratio par rapport au pic maximal. Optimisation de Performance : Lecture Segmentée : Ne charger que les 45 premières secondes (configurable) pour l'analyse spectrale afin de limiter l'usage de la RAM. Hash Blake2b : Calculé sur les 64 premiers Ko et les 64 derniers Ko du fichier pour une identification instantanée des doublons sans lire le corps du fichier. 2. Cerveau IA & Persistance (model.py) Le modèle gère la transition entre les mathématiques pures et l'intuition humaine. Pipeline de Machine Learning : Algorithme : Random Forest Regressor (Scikit-Learn). Entrées (X) : [clipping_rate, snr_db, spectral_cutoff, phase_correlation, crackling_density]. Cible (y) : Valeur entre 0 (Parfait) et 1 (Bannir), mise à jour par les décisions utilisateur. Seuils Dynamiques : Le système calcule chaque soir (ou au lancement) les percentiles de la base SQLite. Seuil d'alerte = Moyenne de la suspicion + (1.5 * Écart-type). Cela permet de ne signaler que les fichiers "anormaux" par rapport à la qualité moyenne de votre collection. 3. Orchestration & Pipeline (app.py) Le contrôleur gère le flux de données asynchrone pour éviter tout gel de l'interface. Le Pipeline de Traitement (Workflow) : Pre-Scan : Vérification de l'existence du Hash en base. Si status == 'BAN', arrêt immédiat. Analyse Parallèle : Envoi du fichier vers un QThreadPool. Inférence ML : Calcul du score de suspicion. Arbitrage LLM (Conditionnel) : Si 0.4<score<0.7, envoi d'un JSON à Ollama (Qwen 2.5) pour un second avis textuel. Mise à jour UI : Publication des résultats via signaux Qt vers le tableau de résultats. 4. Interface Utilisateur Experte (view.py) L'interface doit permettre une validation visuelle en moins de 3 secondes par fichier. Visualisation Temps-Fréquence : Haut (Waveform) : Affichage de l'enveloppe temporelle avec surlignage rouge des zones de clipping détectées. Bas (Spectrogramme) : Affichage colorimétrique (Matplotlib) permettant de voir la densité harmonique. Une coupure nette à 16kHz est visuellement évidente pour l'expert. Système de Révision : Un bouton "Seek to Error" qui déplace le curseur de lecture au premier timestamp problématique identifié par l'analyseur. 5. Gestion des Fichiers & Sécurité Bannissement Stricte : Tout fichier classé "BAN" reçoit un tag en base de données. Même si le fichier est déplacé, son Hash permettra de le reconnaître et de l'exclure des futurs rapports. Nettoyage via send2trash : Lors de la suppression des doublons, les fichiers sont envoyés dans la corbeille système au lieu d'une suppression binaire os.remove(), permettant une récupération en cas d'erreur. Audit Log : Exportation automatique d'un fichier audit.csv après chaque session, récapitulant les gains en espace disque (doublons supprimés) et les fichiers mis en quarantaine.
+
+
+1. Moteur d’analyse avancé (analyzer.py)
+
+Le moteur agit comme un capteur DSP de haute précision transformant le signal audio en métriques objectives.
+
+Fake HQ : FFT + analyse du spectral roll-off (95 % d’énergie < 16.5 kHz à 44.1 kHz).
+
+Analyse de phase : corrélation L/R pour détecter inversion de phase ou faux stéréo.
+
+SNR réel : segmentation en blocs de 100 ms, bruit de fond défini par le bloc RMS minimal.
+
+Optimisations :
+
+Lecture partielle (45 s configurables).
+
+Hash Blake2b partiel (début + fin du fichier).
+
+2. Cerveau IA & persistance (model.py)
+
+Le modèle assure la continuité de l’apprentissage et l’adaptation à la bibliothèque réelle.
+
+RandomForestRegressor
+
+Features ML : clipping, SNR, coupure spectrale, phase, densité de craquements.
+
+Cible continue : score [0–1] ajusté par décisions utilisateur.
+
+Seuils dynamiques :
+
+Calcul statistique (moyenne + 1.5σ) à partir de l’historique SQLite.
+
+3. Orchestration et pipeline (app.py)
+
+Le contrôleur garantit un pipeline fluide, non bloquant et hiérarchisé.
+
+Pre-scan SQL par hash (exclusion immédiate des BAN).
+
+Analyse parallèle via QThreadPool.
+
+Inférence ML locale.
+
+Arbitrage LLM conditionnel (0.4 < score < 0.7).
+
+Mise à jour UI par signaux Qt.
+
+4. Interface utilisateur experte (view.py)
+
+L’interface est conçue pour une décision humaine ultra-rapide.
+
+Waveform avec surlignage des défauts.
+
+Spectrogramme temps-fréquence pour Fake HQ et bruit.
+
+Bouton “Seek to Error” synchronisé avec les timestamps d’analyse.
+
+5. Gestion des fichiers et sécurité
+
+Le système privilégie sécurité, traçabilité et auditabilité.
+
+Bannissement persistant par hash.
+
+Suppression sécurisée via send2trash.
+
+Audit log exporté (audit.csv) par session.
+
+
+
+1. Normalisation explicite des features ML
+
+Actuellement implicite.
+
+Amélioration possible :
+
+Standardisation (z-score ou min-max) documentée pour chaque feature.
+
+Stockage des paramètres de normalisation avec le modèle.
+
+2. Versioning du modèle et des décisions
+
+Ajouter :
+
+model_version
+
+schema_version
+
+date_last_train
+
+Utile pour :
+
+Reproductibilité
+
+Rollback
+
+Comparaison de performances
+
+3. Séparation “Analyse rapide” vs “Analyse profonde”
+
+Spécification optionnelle :
+
+Mode rapide (45 s, FFT légère).
+
+Mode expert (scan complet à la demande).
+
+Améliore encore la scalabilité.
+
+4. Audit Log enrichi
+
+audit.csv pourrait inclure :
+
+Score avant / après ML
+
+Intervention LLM (oui/non)
+
+Décision utilisateur finale
+
+
+
+# Spécifications Fonctionnelles et Techniques – Version Consolidée (Revue Technique)
+
+## 1. Objectif et périmètre
+
+Le système a pour objectif l’analyse qualitative, le tri, la détection de défauts et le nettoyage sécurisé de bibliothèques audio à grande échelle. Il combine analyse DSP déterministe, apprentissage automatique incrémental et arbitrage LLM optionnel, tout en garantissant performance, traçabilité et contrôle humain.
+
+---
+
+## 2. Architecture Générale
+
+### 2.1 Principes structurants
+
+* Architecture asynchrone pilotée par événements (Qt)
+* Séparation stricte UI / Orchestration / Calcul / Persistance
+* Tolérance aux défaillances (LLM, fichiers corrompus)
+* Apprentissage persistant non volatil
+
+### 2.2 Composants
+
+* **view.py** : Interface experte (Qt + Matplotlib)
+* **app.py** : Contrôleur central, orchestration du pipeline
+* **analyzer.py** : Moteur DSP et extraction de features
+* **model.py** : Moteur ML, seuils dynamiques, persistance
+* **llm_service.py** : Arbitrage IA conditionnel (Ollama / Qwen2.5)
+* **audio_history.db** : SQLite thread-safe
+
+---
+
+## 3. Moteur d’analyse avancé (analyzer.py)
+
+### 3.1 Rôle
+
+Transformer un signal temporel audio en métriques objectives, normalisées et exploitables par le ML et l’interface.
+
+### 3.2 Extraction de features DSP
+
+* **Clipping** : taux d’échantillons ≥ 0.98 FS
+* **SNR réel** : segmentation en blocs de 100 ms, bruit de fond défini par le bloc RMS minimal
+* **Craquements** : détection statistique via écart-type (np.std)
+* **Fake HQ / Upsampling** : FFT + spectral roll-off (95 % énergie < 16.5 kHz à 44.1 kHz)
+* **Analyse de phase** : corrélation L/R
+
+  * ≈ -1 : inversion de phase
+  * ≈ 1 constante : faux stéréo (mono encodé)
+
+### 3.3 Détection temporelle
+
+* Identification des timestamps d’anomalies
+* Regroupement intelligent pour éviter la sur-détection
+* Conversion en secondes pour intégration UI
+
+### 3.4 Optimisations et robustesse
+
+* Lecture segmentée (45 s configurables)
+* Hash Blake2b 128-bit calculé sur début + fin du fichier
+* Sécurisation numérique (max(..., 1e-9))
+
+---
+
+## 4. Score de suspicion (Cold Start)
+
+### 4.1 Formule pondérée
+
+```
+suspicion = w1·clipping
+          + w2·max(0, 15 − snr)
+          + w3·crackling
+          + w4·max(0, 60 − quality_base)
+```
+
+### 4.2 Propriétés
+
+* Poids externes (`config.json`)
+* Normalisation [0.0 – 1.0]
+* Feature centrale du modèle ML
+
+---
+
+## 5. Machine Learning et persistance (model.py)
+
+### 5.1 Modèle
+
+* RandomForestRegressor (scikit-learn)
+* Features X : clipping, SNR, spectral_cutoff, phase_corr, crackling_density
+* Cible y : score continu [0–1]
+
+### 5.2 Fonctionnement
+
+* Modèle persistant (joblib)
+* Ré-entraînement automatique à chaque décision utilisateur
+* Prédiction proactive avant arbitrage LLM
+
+### 5.3 Seuils dynamiques
+
+* Calcul des percentiles (P50, P75, P90) depuis SQLite
+* Seuil d’alerte = moyenne + 1.5 × écart-type
+
+---
+
+## 6. Pipeline LLM (llm_service.py)
+
+* Déclenchement conditionnel (0.4 < score < 0.7)
+* Envoi d’un JSON strict (features + score)
+* Réponse structurée exploitable automatiquement
+* Fallback immédiat vers ML local
+
+---
+
+## 7. Orchestration du pipeline (app.py)
+
+### 7.1 Workflow
+
+1. Pre-scan SQL (hash, statut Good / Ban)
+2. Exclusion immédiate des fichiers Ban
+3. Analyse parallèle (QThreadPool)
+4. Calcul score de suspicion
+5. Inférence ML
+6. Arbitrage LLM conditionnel
+7. Mise à jour UI via signaux Qt
+
+---
+
+## 8. Gestion des fichiers et sécurité
+
+* Bannissement persistant par hash
+* Fichiers Ban ignorés définitivement
+* Suppression sécurisée via send2trash
+* Audit log exporté (audit.csv) par session
+
+---
+
+## 9. Interface utilisateur experte (view.py)
+
+### 9.1 Organisation
+
+* Onglets : Scan / Results / Revision / Duplicates
+
+### 9.2 Visualisation
+
+* Waveform avec surlignage des anomalies
+* Spectrogramme temps-fréquence
+* Ligne verticale sur timestamps détectés
+
+### 9.3 Révision rapide
+
+* Bouton “Seek to Error”
+* Lecture précise via QMediaPlayer
+* Validation Bon / Défectueux connectée au ML
+
+---
+
+## 10. Performance et scalabilité
+
+* Chargement audio par segments (Librosa)
+* Cache par hash des fichiers analysés
+* Hash partiel pour fichiers volumineux
+* Multithreading contrôlé (QThreadPool)
+
+---
+
+## 11. Diagramme de séquence UML (pipeline principal)
+
+```
+Utilisateur -> UI(view.py): Lancer scan
+UI -> app.py: start_pipeline()
+app.py -> SQLite: pre_scan(hash)
+SQLite --> app.py: statut
+alt statut != BAN
+    app.py -> QThreadPool: analyser fichier
+    analyzer.py -> app.py: métriques + timestamps
+    app.py -> model.py: predict_suspicion()
+    model.py --> app.py: score
+    alt 0.4 < score < 0.7
+        app.py -> llm_service.py: arbitrage(JSON)
+        llm_service.py --> app.py: décision
+    end
+    app.py -> UI: update résultats
+    Utilisateur -> UI: Bon / Défectueux
+    UI -> model.py: retrain()
+end
+```
+
+---
+
+## 12. État de préparation
+
+Ce document constitue une **spécification consolidée prête pour revue technique**, implémentation et audit architectural.
+
+
+
+

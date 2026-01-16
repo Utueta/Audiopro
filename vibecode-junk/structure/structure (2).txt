@@ -1,0 +1,36 @@
+Audio_Expert_Pro/
+├── app.py                  # Point d'entrée : Initialisation Core & Boucle Qt
+├── analyzer.py             # Moteur DSP : Pipeline Librosa, FFT & Hachage Blake2b
+├── model.py                # Intelligence Locale : Interface Random Forest & Persistance
+├── workers.py              # Multithreading : Gestion des QRunnable pour l'analyse asynchrone
+├── splash_screen.py        # Bootloader : Diagnostic système & Check Ollama
+├── config.json             # Orchestration : Seuils, poids ML et chemins relatifs
+├── requirements.txt        # Dépendances : Stack DSP, ML et UI
+│
+├── services/               # Services Externes (Communication API)
+│   └── llm_service.py      # Client Ollama : Arbitrage Qwen2.5-7B-Instruct & Gestion des Timeouts
+│
+├── ui/                     # Découplage de l'Interface
+│   ├── view.py             # Dashboard : Layout Obsidian & Gestion du Drag & Drop
+│   ├── components.py       # Widgets : Mini-player, Jauges Cyan et Graphes Inferno
+│   └── theme.qss           # Stylesheet : Design system "Deep Obsidian Dark"
+│
+├── assets/                 # Branding & Médias
+│   └── icon.png            # Identité visuelle (Cyan/Obsidian)
+│
+├── database/               # Persistance Sécurisée
+│   ├── audio_expert_v01.db # SQLite : Historique des analyses & Feedback utilisateur
+│   └── history.json        # Cache léger pour les sessions rapides
+│
+├── models/                 # Artifacts d'IA
+│   ├── audio_expert_rf.joblib # Modèle Random Forest pré-entraîné
+│   └── scaler.pkl          # Normalisation des données DSP
+│
+├── logs/                   # Monitoring & Diagnostic
+│   └── session.log         # Journal d'audit (Erreurs DSP, LLM et Système)
+│
+└── scripts/                # DevOps & Maintenance
+    ├── setup_project.sh    # Installateur automatisé (Structure & Venv)
+    ├── init_model.py       # Amorçage : Génération du .joblib initial
+    ├── reset_brain.sh      # Maintenance : Purge sécurisée (DB/Models)
+    └── check_health.py     # Diagnostic : Vérification CUDA/GPU & Version Ollama

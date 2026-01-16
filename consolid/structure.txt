@@ -1,32 +1,75 @@
 Audiopro/
-├── core/                       # Cœur logique du système
-│   ├── analyzer/               # Analyseurs techniques
-│   │   ├── dsp.py              # Signal pur (RMS, Phase, Clipping)
-│   │   ├── spectral.py         # Analyse fréquentielle (Cutoff, Segments)
-│   │   └── metadata.py         # Extraction bitrate/format (Mutagen)
-│   ├── brain/                  # Intelligence Artificielle (ML)
-│   │   ├── model.py            # Logique d'inférence Random Forest
-│   │   └── weights/            # Fichiers de modèles entraînés (.pkl)
-│   └── manager.py              # Chef d'orchestre & Cache SQL
-├── services/                   # Micro-services et APIs
-│   └── llm_service.py          # Interface Ollama / Qwen 2.5
-├── ui/                         # Interface Utilisateur
-│   ├── view.py                 # Fenêtre principale et graphiques
-│   └── components/             # Widgets personnalisés (boutons, barres)
-├── database/                   # Stockage des données (SQLite)
-│   └── inventory.db
-├── logs/                       # [AJOUTÉ] Traces d'exécution et erreurs
-│   ├── analysis.log            # Logs des scans audio
-│   └── system.log              # Logs des erreurs critiques et LLM
-├── assets/                     # Ressources graphiques (Icônes, Logos)
-├── tests/                      # Suite de tests unitaires
-├── app.py                      # Point d'entrée principal
-├── config.json                 # Configuration globale
-├── install_system_deps.sh      # Script d'installation OS (Fedora/Debian)
-├── smi.sh                      # Monitoring ressources (CPU/RAM)
-├── Tuto.md                     # Manuel d'utilisateur
-├── Release Note.md             # Historique des versions
-├── readme.md                   # Documentation d'accueil
-├── rapport final de certification.md 
-├── requirements.txt            # Dépendances Python
-└── .gitignore                  # Protection (exclut logs/ et database/)
+├── app.py                          # Entry point with dependency injection
+├── config.json                     # Global configuration (paths & params)
+├── requirements.txt                # Python dependencies (PySide6, librosa, etc.)
+├── .gitignore                      # Protection (excludes logs/ and database/)
+│
+├── core/                           # Domain Logic (The Hexagon Core)
+│   ├── __init__.py
+│   ├── models.py                   # Data Contracts (AnalysisResult, ClassificationResult)
+│   ├── analyzer/                   # DSP Subsystem
+│   │   ├── __init__.py
+│   │   ├── pipeline.py             # Facade: Memory-scoped analysis entry
+│   │   ├── dsp.py                  # High-precision feature extraction (RMS, Phase, Clipping)
+│   │   ├── spectral.py             # Frequency analysis (Cutoff, Segments)
+│   │   └── metadata.py             # Bitrate/format extraction (Mutagen)
+│   ├── brain/                      # Machine Learning Brain
+│   │   ├── __init__.py
+│   │   ├── model_interface.py      # Abstract Protocol definition for ML models
+│   │   ├── random_forest.py        # Incremental learner implementation
+│   │   └── weights/                # Persistent model weights (.pkl)
+│   ├── workers.py                  # Qt Infrastructure: QRunnable & Signals  handles only the threading boilerplate and the Signal emission (see threading docs)
+│   └── manager.py                  # Orchestrator: Connects UI to Core/Repo
+│
+├── persistence/                    # Infrastructure: Data Storage
+│   ├── __init__.py
+│   ├── repository.py               # SQLite Adapter with WAL Mode enabled (see connection docs)
+│   └── schema.py                   # Database schema & migrations
+│
+├── services/                       # Infrastructure: External APIs
+│   ├── __init__.py
+│   ├── llm_interface.py            # LLM Provider Protocol
+│   ├── ollama_llm.py               # Ollama / Qwen 2.5 implementation
+│   └── mock_llm.py                 # Testing stub
+│
+├── ui/                             # Presentation Layer
+│   ├── __init__.py
+│   ├── view.py                     # Main window and graphics
+│   ├── splash_screen.py            # Bootloader & diagnostics
+│   ├── components/                 # Custom widgets
+│   │   ├── __init__.py
+│   │   ├── mini_player.py
+│   │   ├── gauges.py
+│   │   └── graphs.py
+│   └── theme.qss                   # Stylesheet
+│
+├── database/                       # Data Storage
+│   └── audiopro_v01.db             # SQLite (versioned naming)
+│
+├── logs/                           # Execution Traces
+│   ├── analysis.log                # Audio scan logs
+│   └── system.log                  # Critical errors and LLM logs
+│
+├── assets/                         # Graphic Resources
+│   └── icons/
+│
+├── tests/                          # Test Suite
+│   ├── __init__.py
+│   ├── test_pipeline.py            # DSP pipeline integration
+│   ├── test_model.py               # ML inference
+│   ├── test_llm_service.py         # LLM with mock
+│   ├── test_repository.py          # Database operations
+│   └── fixtures/                   # Test audio files
+│
+├── scripts/                        # DevOps & Maintenance
+│   ├── install_system_deps.sh      # OS dependencies installation (Fedora, Debian, Arch, Ubuntu)
+│   ├── init_model.py               # Bootstrap: Initial .pkl generation
+│   ├── check_health.py             # Diagnostics: CUDA/GPU & Ollama Availability
+│   └── smi.sh                      # Resource monitoring (GPU/VRAM)
+│
+└── docs/                           # Documentation
+    ├── README.md                   # Welcome & overview
+    ├── TUTORIAL.md                 # User manual
+    ├── RELEASE_NOTES.md            # Version history
+    ├── ARCHITECTURE.md             # Design decisions & patterns (see threading docs)
+    └── CERTIFICATION_REPORT.md     # Final certification

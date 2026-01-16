@@ -1,0 +1,52 @@
+{
+    "project": {
+        "name": "Audio Expert Pro",
+        "version": "0.1",
+        "author": "User"
+    },
+    "paths": {
+        "db_name": "audio_expert_v01.db",
+        "quarantine_folder": "./quarantine",
+        "logs_folder": "./logs"
+    },
+    "audio": {
+        "extensions": [".mp3", ".flac", ".wav", ".m4a", ".ogg", ".aiff"],
+        "sample_duration_sec": 45,
+        "hash_algorithm": "blake2b"
+    },
+    "analysis_thresholds": {
+        "clipping_threshold": 0.98,
+        "snr_bad_threshold_db": 20.0,
+        "crackling_sensitivity": 0.05,
+        "fake_hq_cutoff_khz": 16.0,
+        "phase_mono_threshold": 0.1
+    },
+    "ml_engine": {
+        "algorithm": "RandomForestRegressor",
+        "retrain_interval": 5,
+        "auto_weight_adjust": true,
+        "weights": {
+            "w_fake_hq": 0.40,
+            "w_clipping": 0.25,
+            "w_snr": 0.15,
+            "w_crackling": 0.10,
+            "w_phase": 0.10
+        }
+    },
+    "llm": {
+        "model_name": "qwen2.5",
+        "api_url": "http://localhost:11434/api/generate",
+        "arbitration_zone": {
+            "min_score": 0.4,
+            "max_score": 0.7
+        },
+        "output_format": "json",
+        "priority": "hierarchical"
+    },
+    "ui_settings": {
+        "refresh_rate_ms": 100,
+        "gpu_monitoring": true,
+        "theme": "dark",
+        "show_spectrogram": true
+    }
+}

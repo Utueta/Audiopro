@@ -1,0 +1,42 @@
+Audiopro/
+├── app.py                          # Entry point with dependency injection
+├── config.json                     # Global configuration (paths & params)
+├── requirements.txt                # Python dependencies (PySide6, librosa, etc.)
+├── .gitignore                      # Protection (excludes logs/ and database/)
+│
+├── core/                           # Domain Logic (The Hexagon Core)
+│   ├── __init__.py
+│   ├── models.py                   # Data Contracts (AnalysisResult, ClassificationResult)
+│   ├── analyzer/                   # DSP Subsystem
+│   │   ├── __init__.py
+│   │   ├── pipeline.py             # Facade: Memory-scoped analysis entry
+│   │   └── dsp.py                  # High-precision feature extraction
+│   ├── brain/                      # Machine Learning Brain
+│   │   ├── __init__.py
+│   │   ├── model_interface.py      # Abstract Protocol for ML models
+│   │   ├── random_forest.py        # Incremental learner implementation
+│   │   └── weights/                # Persistent model weights (.pkl)
+│   ├── workers.py                  # Qt Infrastructure: QRunnable & Signals
+│   └── manager.py                  # Orchestrator: Connects UI to Core/Repo
+│
+├── persistence/                    # Infrastructure: Data Storage
+│   ├── __init__.py
+│   └── repository.py               # SQLite Adapter with WAL Mode enabled
+│
+├── services/                       # Infrastructure: External APIs
+│   ├── __init__.py
+│   └── ollama_llm.py               # Asynchronous AI Arbitration service
+│
+├── ui/                             # Presentation Layer
+│   ├── __init__.py
+│   ├── view.py                     # Expert Audit Interface (Qt Main Window)
+│   └── theme.qss                   # Industrial stylesheet
+│
+├── logs/                           # Execution Traces
+│   └── system.log                  # Traceability for errors and LLM calls
+│
+├── scripts/                        # DevOps & Deployment
+│   └── install_system_deps.sh      # OS-level binary automation (ffmpeg/sndfile)
+│
+└── docs/                           # Documentation
+    └── TUTORIAL.md                 # System operation guide
