@@ -1,33 +1,30 @@
-import traceback
-from PySide6.QtCore import QRunnable, QObject, Signal, Slot
+from PySide6.QtCore import QRunnable, QObject, Signal
+from core.models import AnalysisResult
 
-class AnalysisSignals(QObject):
-    dsp_ready = Signal(dict)
-    result = Signal(dict)
-    error = Signal(tuple)
+class WorkerSignals(QObject):
+    """Explicit thread affinity signals for UI safety."""
+    result = Signal(AnalysisResult)  # Returns immutable Data Contract
+    error = Signal(str)
     finished = Signal()
 
 class AnalysisWorker(QRunnable):
-    def __init__(self, file_path, analyzer, model, llm=None):
+    """Infrastructure bridge for offloading DSP to background threads."""
+    def __init__(self, file_path: str, analyzer_func):
         super().__init__()
-        self.file_path, self.analyzer, self.model, self.llm = file_path, analyzer, model, llm
-        self.signals = AnalysisSignals()
+        self.file_path = file_path
+        self.analyzer_func = analyzer_func
+        self.signals = WorkerSignals()
+        
+        # Ensure the worker is cleaned up by Qt after execution
+        self.setAutoDelete(True)
 
-    @Slot()
     def run(self):
+        """Thread-safe execution block. Zero UI access permitted."""
         try:
-            # Etape 1 : DSP & Score initial
-            metrics = self.analyzer.get_metrics(self.file_path)
-            metrics['score'] = self.model.predict(metrics)
-            self.signals.dsp_ready.emit(metrics)
-
-            # Etape 2 : Arbitrage LLM
-            metrics['analysis_text'] = ""
-            if self.llm and self.llm.check_arbitration(metrics['score']):
-                metrics['analysis_text'] = self.llm.analyze_anomaly(metrics)
-            
-            self.signals.result.emit(metrics)
+            # Logic execution is fully isolated from Main Thread
+            result = self.analyzer_func(self.file_path)
+            self.signals.result.emit(result)
         except Exception as e:
-            self.signals.error.emit((e, traceback.format_exc()))
+            self.signals.error.emit(str(e))
         finally:
             self.signals.finished.emit()

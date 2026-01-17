@@ -1,98 +1,126 @@
 import sys
 import os
+import logging
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QThreadPool, QRunnable, Signal, QObject, Slot
+from PySide6.QtCore import Qt, QThreadPool, Slot, QObject
 
-# Importation de nos modules consolidés
-from ui.view import AudioExpertView
+# Modules consolidés (issus du buffer actif)
 from core.manager import CentralManager
-from workers import AnalysisWorker # Nécessite un petit wrapper QRunnable
+from ui.view import AudioAnalysisView
+from ui.components.splash import ObsidianSplashScreen
+from core.workers import AnalysisWorker 
 
-class AppController(QObject):
+class AudioproController(QObject):
+    """
+    Contrôleur de Certification (MVC).
+    Lien dynamique entre l'UI Obsidian Glow et le moteur asynchrone.
+    """
     def __init__(self):
         super().__init__()
+        self._setup_logging()
+        self.logger = logging.getLogger("Audiopro.Controller")
         
-        # 1. Configuration et Initialisation du Core
-        self.config = {
-            "db_path": "database/audio_expert.db",
-            "model_path": "models/audio_expert_rf.joblib"
-        }
+        # 1. Initialisation du moteur (Core)
+        self.manager = CentralManager()
         
-        # Initialisation du Manager (WAL, RAM Safety, ML)
-        self.manager = CentralManager(
-            db_path=self.config["db_path"],
-            model_path=self.config["model_path"],
-            config=self.config
-        )
-        
-        # 2. Initialisation de la Vue
-        self.view = AudioExpertView()
-        
-        # 3. Gestionnaire de Threads
+        # 2. Gestionnaire de Threads haute performance
         self.threadpool = QThreadPool()
-        # On limite le nombre de threads pour préserver la stabilité (CPU/RAM)
-        self.threadpool.setMaxThreadCount(os.cpu_count() or 4)
+        # DevSecOps : Limitation pour éviter l'épuisement des ressources sur Fedora
+        self.threadpool.setMaxThreadCount(max(2, os.cpu_count() or 4))
         
-        # 4. Connexion des Signaux (La "Colle")
-        self.view.request_scan.connect(self.start_folder_scan)
-        self.view.request_action.connect(self.handle_user_decision)
+        # 3. Préparation de la Vue
+        self.view = AudioAnalysisView(self.manager)
+        
+        # 4. Connexion des signaux (Liaison UI-Logic)
+        self.view.request_scan.connect(self.start_analysis)
+        self.view.request_action.connect(self.handle_feedback)
 
-    def start_folder_scan(self, folder_path):
-        """Déclenche l'analyse asynchrone de tous les fichiers du dossier."""
-        supported_ext = ('.flac', '.wav', '.mp3', '.m4a', '.aiff')
-        files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) 
-                 if f.lower().endswith(supported_ext)]
-        
-        if not files:
-            self.view.log_output.setText("Aucun fichier audio supporté trouvé.")
+    def _setup_logging(self):
+        os.makedirs("logs", exist_ok=True)
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+            handlers=[logging.FileHandler("logs/controller.log"), logging.StreamHandler()]
+        )
+
+    @Slot(str)
+    def start_analysis(self, path):
+        """
+        Point d'entrée unique pour Drag & Drop ou Sélection manuelle.
+        Gère intelligemment fichiers et répertoires.
+        """
+        supported = ('.flac', '.wav', '.mp3', '.aiff', '.m4a')
+        files_to_process = []
+
+        if os.path.isdir(path):
+            self.logger.info(f"Scan de répertoire détecté : {path}")
+            files_to_process = [os.path.join(path, f) for f in os.listdir(path) 
+                                if f.lower().endswith(supported)]
+        elif os.path.isfile(path) and path.lower().endswith(supported):
+            self.logger.info(f"Fichier unique détecté : {path}")
+            files_to_process = [path]
+
+        if not files_to_process:
+            self.view.console.append("<span style='color: #FF0055;'>[!] Aucun fichier audio compatible trouvé.</span>")
             return
 
-        self.view.progress_bar.setMaximum(len(files))
+        # Configuration de la progression
+        self.view.progress_bar.setMaximum(len(files_to_process))
         self.view.progress_bar.setValue(0)
-        
-        for file_path in files:
+        self.view.progress_bar.show()
+        self.view.status_label.setText(f"ANALYSE DE {len(files_to_process)} ÉLÉMENT(S)...")
+
+        # Distribution dans le ThreadPool
+        for file_path in files_to_process:
             worker = AnalysisWorker(self.manager, file_path)
-            worker.signals.result.connect(self.on_analysis_finished)
-            worker.signals.error.connect(lambda msg: print(f"Erreur : {msg}"))
+            # Connexion des signaux du worker vers le contrôleur
+            worker.signals.result.connect(self._on_item_finished)
+            worker.signals.error.connect(lambda m: self.logger.error(f"Worker Error: {m}"))
             self.threadpool.start(worker)
 
     @Slot(dict)
-    def on_analysis_finished(self, result):
-        """Réception des données du Manager et mise à jour de l'UI."""
-        if result["status"] == "SUCCESS":
-            self.view.update_results(result)
-            self.view.progress_bar.setValue(self.view.progress_bar.value() + 1)
-        elif result["status"] == "SKIPPED":
-            # On met à jour quand même la progression pour les fichiers déjà connus
-            self.view.progress_bar.setValue(self.view.progress_bar.value() + 1)
+    def _on_item_finished(self, result):
+        """Mise à jour thread-safe de l'UI Obsidian suite à une analyse."""
+        self.view.update_ui_with_results(result)
+        
+        current_val = self.view.progress_bar.value()
+        new_val = current_val + 1
+        self.view.progress_bar.setValue(new_val)
+        
+        # Si le batch est fini
+        if new_val >= self.view.progress_bar.maximum():
+            self.view.status_label.setText("BATCH TERMINÉ")
+            self.view.progress_bar.hide()
+            self.logger.info("Batch d'analyse terminé avec succès.")
 
     @Slot(str, str)
-    def handle_user_decision(self, file_hash, action):
-        """Transmet le feedback humain au cerveau (ML) pour réentraînement."""
-        # Récupération des données en base pour le feedback
-        cursor = self.manager.conn.cursor()
-        cursor.execute("SELECT clipping, snr, phase_corr, fake_hq_score FROM inventory WHERE hash=?", (file_hash,))
-        row = cursor.fetchone()
-        
-        if row:
-            features = {
-                "clipping": row[0], "snr": row[1], 
-                "phase": row[2], "fake_hq": row[3]
-            }
-            label = 1.0 if action == "BAN" else 0.0
-            self.manager.brain.add_feedback(features, label)
-            
-            # Mise à jour du statut en base
-            self.manager.conn.execute(
-                "UPDATE inventory SET status=? WHERE hash=?", (action, file_hash)
-            )
-            self.manager.conn.commit()
+    def handle_feedback(self, file_hash, action):
+        """Feedback loop pour l'apprentissage du Brain (ML)."""
+        self.logger.info(f"Feedback expert : {action} pour {file_hash}")
+        self.manager.apply_human_feedback(file_hash, action)
+        self.view.console.append(f"<span style='color: #00F2FF;'>[BRAIN] Feedback '{action}' enregistré.</span>")
+
+def main():
+    # Fix pour les écrans High DPI (Standard V5)
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
+    
+    app = QApplication(sys.argv)
+    app.setApplicationName("Audiopro Expert Certification")
+
+    # Instance du Contrôleur (MVC)
+    controller = AudioproController()
+
+    # Orchestration du lancement
+    def launch_sequence():
+        controller.view.show()
+        splash.close()
+
+    # SplashScreen Obsidian Glow
+    splash = ObsidianSplashScreen(on_complete_callback=launch_sequence)
+    splash.show()
+
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    
-    # Instance du contrôleur
-    controller = AppController()
-    controller.view.show()
-    
-    sys.exit(app.exec())
+    main()

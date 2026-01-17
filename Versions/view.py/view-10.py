@@ -1,26 +1,50 @@
-from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QTextEdit, QLabel
+from PySide6.QtWidgets import *
 from PySide6.QtCore import Qt, Signal
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
-class AudioExpertView(QMainWindow):
-    scan_requested = Signal(str)
-    def __init__(self, config):
+class MainView(QMainWindow):
+    def __init__(self):
         super().__init__()
-        self.setWindowTitle("AUDIO EXPERT PRO V0.2.4")
-        self.resize(800, 600)
-        self.setAcceptDrops(True)
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-        self.status = QLabel("GLISSEZ UN FICHIER")
-        self.report = QTextEdit()
-        layout.addWidget(self.status)
-        layout.addWidget(self.report)
+        self.setWindowTitle("Audio Expert Pro V4")
+        self.resize(1300, 900)
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
+        
+        self.setup_analyse_tab()
+        self.setup_results_tab()
+        self.setup_review_tab()
 
-    def handle_analysis_result(self, res):
-        self.status.setText(f"SCORE : {res['score']:.2f}")
-        self.report.setText(res.get('analysis_text', "Analyse terminée."))
+    def setup_analyse_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        self.btn_browse = QPushButton("📁 Sélectionner Dossier")
+        self.progress = QProgressBar()
+        self.log = QTextEdit(); self.log.setReadOnly(True)
+        layout.addWidget(self.btn_browse); layout.addWidget(self.progress); layout.addWidget(self.log)
+        self.tabs.addTab(tab, "📊 Analyse")
 
-    def dragEnterEvent(self, e): e.accept() if e.mimeData().hasUrls() else e.ignore()
-    def dropEvent(self, e):
-        for url in e.mimeData().urls(): self.scan_requested.emit(url.toLocalFile())
+    def setup_results_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["Fichier", "Score Qualité", "ML Suspicion", "Type HQ", "Tag"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.table)
+        self.tabs.addTab(tab, "📋 Résultats")
 
+    def setup_review_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        self.lbl_current = QLabel("Sélectionnez un fichier pour révision")
+        self.fig, self.ax = plt.subplots(figsize=(8, 3))
+        self.canvas = FigureCanvas(self.fig)
+        
+        btn_layout = QHBoxLayout()
+        self.btn_good = QPushButton("✅ BON"); self.btn_bad = QPushButton("❌ DÉFECTUEUX")
+        btn_layout.addWidget(self.btn_good); btn_layout.addWidget(self.btn_bad)
+        
+        layout.addWidget(self.lbl_current)
+        layout.addWidget(self.canvas)
+        layout.addLayout(btn_layout)
+        self.tabs.addTab(tab, "🎧 Révision")

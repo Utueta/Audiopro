@@ -1,139 +1,161 @@
-from PySide6.QtWidgets import *
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QAction
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-import librosa.display
+
+from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSlider, QLabel, QPushButton, QGraphicsDropShadowEffect, QTextEdit
+
+from PySide6.QtCore import Qt, Signal, QPropertyAnimation
+
+from PySide6.QtGui import QColor, QImage, QPixmap
+
 import numpy as np
 
-class MainView(QMainWindow):
-    def __init__(self):
+
+class AudioExpertView(QMainWindow):
+
+    scan_requested = Signal(str)
+
+    feedback_given = Signal(str, bool)
+
+
+    def __init__(self, config):
+
         super().__init__()
-        self.setWindowTitle("Audio Expert Pro V4.1 - Ultra Edition")
-        self.setMinimumSize(1300, 900)
-        
-        self.tabs = QTabWidget()
-        self.setCentralWidget(self.tabs)
-        
-        # Initialisation des 3 onglets
-        self.tab_scan = QWidget()
-        self.tab_review = QWidget()
-        self.tab_duplicates = QWidget()
-        
-        self.tabs.addTab(self.tab_scan, "🚀 Scan Pipeline")
-        self.tabs.addTab(self.tab_review, "🎧 Visualisation & Player")
-        self.tabs.addTab(self.tab_duplicates, "👯 Doublons")
 
-        self._setup_scan_tab()
-        self._setup_review_tab()
-        self._setup_duplicates_tab()
+        self.config, self.current_hash = config, None
 
-    def _setup_scan_tab(self):
-        layout = QVBoxLayout(self.tab_scan)
-        
-        # Barre d'outils Scan
-        top_bar = QHBoxLayout()
-        self.btn_start = QPushButton("📁 Sélectionner & Scanner Dossier")
-        self.btn_start.setStyleSheet("padding: 10px; font-weight: bold; background-color: #2ecc71; color: white;")
-        
-        self.combo_options = QComboBox()
-        self.combo_options.addItems(["Scan Rapide", "Scan Profond", "Ré-analyser tout"])
-        
-        top_bar.addWidget(self.btn_start, 3)
-        top_bar.addWidget(self.combo_options, 1)
-        
-        # Tableau Principal
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["ID", "Fichier", "Score ML", "Status", "Verdict LLM"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        
-        # Journal de log
-        self.log = QTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumHeight(150)
-        self.log.setStyleSheet("background-color: #2c3e50; color: #ecf0f1; font-family: monospace;")
-        
-        layout.addLayout(top_bar)
-        layout.addWidget(self.table)
-        layout.addWidget(QLabel("📜 Journal d'analyse :"))
-        layout.addWidget(self.log)
+        self.setAcceptDrops(True)
 
-    def _setup_review_tab(self):
-        layout = QHBoxLayout(self.tab_review)
-        
-        # --- CÔTÉ GAUCHE : VISUALISATION ---
-        left_side = QVBoxLayout()
-        
-        # Création des deux graphiques (Waveform + Spectrogramme)
-        
-        self.fig, (self.ax_wave, self.ax_spec) = plt.subplots(2, 1, figsize=(8, 10))
-        self.fig.tight_layout(pad=3.0)
-        self.canvas = FigureCanvas(self.fig)
-        
-        left_side.addWidget(self.canvas)
-        
-        # --- CÔTÉ DROIT : CONTRÔLES ---
-        right_side = QVBoxLayout()
-        
-        self.info_box = QGroupBox("🔍 Détails de l'analyse")
-        info_layout = QVBoxLayout()
-        self.lbl_details = QLabel("Sélectionnez un fichier pour voir les détails...")
-        self.lbl_details.setWordWrap(True)
-        info_layout.addWidget(self.lbl_details)
-        self.info_box.setLayout(info_layout)
-        
-        # Boutons de décision
-        self.btn_good = QPushButton("✅ VALIDER (Bon)")
-        self.btn_good.setStyleSheet("background-color: #27ae60; color: white; height: 40px; font-weight: bold;")
-        
-        self.btn_bad = QPushButton("❌ REJETER (Ban)")
-        self.btn_bad.setStyleSheet("background-color: #c0392b; color: white; height: 40px; font-weight: bold;")
-        
-        right_side.addWidget(self.info_box)
-        right_side.addStretch()
-        right_side.addWidget(self.btn_good)
-        right_side.addWidget(self.btn_bad)
-        
-        layout.addLayout(left_side, 3)
-        layout.addLayout(right_side, 1)
+        self._setup_ui()
 
-    def _setup_duplicates_tab(self):
-        layout = QVBoxLayout(self.tab_duplicates)
-        
-        self.table_dup = QTableWidget(0, 3)
-        self.table_dup.setHorizontalHeaderLabels(["Doublon (inférieur)", "Raison", "Original (conservé)"])
-        self.table_dup.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        
-        self.btn_clean_duplicates = QPushButton("🗑️ Marquer les doublons pour suppression")
-        self.btn_clean_duplicates.setStyleSheet("background-color: #e67e22; color: white; padding: 10px;")
-        
-        layout.addWidget(QLabel("👯 Doublons identifiés par Hash & Bitrate :"))
-        layout.addWidget(self.table_dup)
-        layout.addWidget(self.btn_clean_duplicates)
 
-    def update_visuals(self, path, ts_sample):
-        """Mise à jour synchronisée Waveform + Spectrogramme."""
-        try:
-            # Charger 30 secondes pour la visualisation
-            y, sr = librosa.load(path, duration=30)
-            
-            # 1. Waveform
-            self.ax_wave.clear()
-            librosa.display.waveshow(y, sr=sr, ax=self.ax_wave, color='#3498db')
-            if ts_sample > 0:
-                self.ax_wave.axvline(x=ts_sample, color='red', linestyle='--', label='Défaut détecté')
-            self.ax_wave.set_title(f"Waveform : {os.path.basename(path)}")
-            
-            # 2. Spectrogramme (La clé pour le Fake HQ)
-            self.ax_spec.clear()
-            S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
-            S_db = librosa.power_to_db(S, ref=np.max)
-            img = librosa.display.specshow(S_db, x_axis='time', y_axis='mel', sr=sr, ax=self.ax_spec)
-            self.ax_spec.set_title("Analyse Spectrale (Vérification 16kHz+)")
-            
-            self.canvas.draw()
-        except Exception as e:
-            print(f"Erreur d'affichage : {e}")
+    def _setup_ui(self):
 
-import os
+        self.setWindowTitle("AUDIO EXPERT PRO - OBSIDIAN V0.2.4")
+
+        self.resize(1150, 800)
+
+        self.central = QWidget()
+
+        self.setCentralWidget(self.central)
+
+        self.layout = QVBoxLayout(self.central)
+
+        self.layout.setContentsMargins(20, 20, 20, 20)
+
+        self.layout.setSpacing(15)
+
+
+        # Status & Glow Effect
+
+        self.status_label = QLabel("GLISSEZ UN FICHIER AUDIO")
+
+        self.status_label.setAlignment(Qt.AlignCenter)
+
+        self.status_label.setStyleSheet("font-size: 26px; color: #00F2FF; font-weight: bold; padding: 20px;")
+
+        
+
+        self.glow = QGraphicsDropShadowEffect()
+
+        self.glow.setBlurRadius(0)
+
+        self.glow.setColor(QColor(0, 242, 255))
+
+        self.status_label.setGraphicsEffect(self.glow)
+
+        self.layout.addWidget(self.status_label)
+
+
+        # Expert Report Panel
+
+        self.report_area = QTextEdit("IA : En attente d'analyse...")
+
+        self.report_area.setReadOnly(True)
+
+        self.report_area.setStyleSheet("background: #1A1C25; padding: 15px; border-radius: 8px; color: #BBBBBB; font-family: 'Consolas', monospace;")
+
+        self.layout.addWidget(self.report_area)
+
+
+        # Control UI
+
+        self.layout.addWidget(QLabel("INSPECTION SPECTRALE (ZOOM)"))
+
+        self.zoom_slider = QSlider(Qt.Horizontal)
+
+        self.zoom_slider.setRange(5, 100)
+
+        self.zoom_slider.setValue(100)
+
+        self.layout.addWidget(self.zoom_slider)
+
+
+        btns = QHBoxLayout()
+
+        self.btn_ok = QPushButton("VERDICT CORRECT ✅")
+
+        self.btn_ko = QPushButton("ERREUR IA ❌")
+
+        for b in [self.btn_ok, self.btn_ko]:
+
+            b.setFixedHeight(45)
+
+            b.setStyleSheet("font-weight: bold; background: #2D3139; color: white; border-radius: 4px;")
+
+        
+
+        self.btn_ok.clicked.connect(lambda: self.submit_feedback(True))
+
+        self.btn_ko.clicked.connect(lambda: self.submit_feedback(False))
+
+        btns.addWidget(self.btn_ok)
+
+        btns.addWidget(self.btn_ko)
+
+        self.layout.addLayout(btns)
+
+
+    def handle_dsp_ready(self, res):
+
+        self.current_hash = res['hash']
+
+        self.status_label.setText(f"SCORE DÉTECTÉ : {res['score']:.2f}")
+
+        self._trigger_glow(res['score'] > 0.6)
+
+
+    def handle_analysis_result(self, res):
+
+        analysis = res.get('analysis_text', "")
+
+        self.report_area.setText(f"RAPPORT D'EXPERTISE :\n\n{analysis if analysis else 'Analyse DSP pure complétée.'}")
+
+
+    def submit_feedback(self, val):
+
+        if self.current_hash:
+
+            self.feedback_given.emit(self.current_hash, val)
+
+            self.status_label.setText("FEEDBACK ENREGISTRÉ")
+
+
+    def _trigger_glow(self, active):
+
+        if hasattr(self, 'anim'): self.anim.stop()
+
+        self.anim = QPropertyAnimation(self.glow, b"blurRadius")
+
+        self.anim.setEndValue(30 if active else 0)
+
+        self.anim.setDuration(1000)
+
+        self.anim.start()
+
+
+    def dragEnterEvent(self, e):
+
+        if e.mimeData().hasUrls(): e.accept()
+
+    def dropEvent(self, e):
+
+        for url in e.mimeData().urls(): self.scan_requested.emit(url.toLocalFile())
+

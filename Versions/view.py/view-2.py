@@ -1,139 +1,98 @@
-import os
-import sys
-from PySide6.QtWidgets import (QMainWindow, QTabWidget, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QPushButton, QFileDialog, QTableWidget, 
-                             QTableWidgetItem, QProgressBar, QLabel)
-from PySide6.QtCore import Qt, Slot, Signal
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                             QSlider, QLabel, QPushButton, QGraphicsDropShadowEffect)
+from PySide6.QtCore import Qt, Signal, QPropertyAnimation
+from PySide6.QtGui import QColor, QImage, QPixmap
+import numpy as np
 
 class AudioExpertView(QMainWindow):
-    # Signaux pour communiquer avec le contrôleur (app.py)
-    request_scan = Signal(str)
-    request_action = Signal(str, str) # hash, action (GOOD/BAN)
+    scan_requested = Signal(str)
+    feedback_given = Signal(str, bool)
 
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
-        self.setWindowTitle("Audio Expert Pro V2.0 - Obsidian Dark")
-        self.resize(1200, 800)
-        self._apply_theme()
-        
-        # Central Widget & Tabs
-        self.tabs = QTabWidget()
-        self.setCentralWidget(self.tabs)
-        
-        # Initialisation des onglets
-        self.tab_scan = QWidget()
-        self.tab_results = QWidget()
-        self.tab_revision = QWidget()
-        self.tab_duplicates = QWidget()
-        
-        self.tabs.addTab(self.tab_scan, "🚀 SCAN")
-        self.tabs.addTab(self.tab_results, "📊 RÉSULTATS")
-        self.tabs.addTab(self.tab_revision, "🔍 RÉVISION")
-        self.tabs.addTab(self.tab_duplicates, "👯 DOUBLONS")
-        
-        self._setup_scan_tab()
-        self._setup_results_tab()
-        self._setup_revision_tab()
+        self.config = config
+        self._pixmap_cache = None
+        self.current_hash = None
+        self.setAcceptDrops(True)
+        self._setup_ui()
 
-    def _apply_theme(self):
-        """Design system 'Deep Obsidian Dark'."""
-        self.setStyleSheet("""
-            QMainWindow { background-color: #1a1a1a; }
-            QTabWidget::pane { border: 1px solid #333; background: #1a1a1a; }
-            QTabBar::tab { background: #2d2d2d; color: #888; padding: 10px 20px; }
-            QTabBar::tab:selected { background: #1a1a1a; color: #00f2ff; border-bottom: 2px solid #00f2ff; }
-            QPushButton { background-color: #00f2ff; color: #000; font-weight: bold; border-radius: 4px; padding: 8px; }
-            QPushButton:hover { background-color: #00c8d4; }
-            QTableWidget { background-color: #262626; color: #eee; gridline-color: #333; }
-        """)
+    def _setup_ui(self):
+        self.setWindowTitle("AUDIO EXPERT PRO [OBSIDIAN]")
+        self.resize(1100, 750)
+        self.central = QWidget()
+        self.setCentralWidget(self.central)
+        self.layout = QVBoxLayout(self.central)
 
-    def _setup_scan_tab(self):
-        layout = QVBoxLayout(self.tab_scan)
+        # Moniteur Principal (Score & Glow)
+        self.status_label = QLabel("DÉPOSEZ UN FICHIER AUDIO")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #00F2FF;")
+        self.layout.addWidget(self.status_label)
         
-        self.btn_select = QPushButton("SÉLECTIONNER UN DOSSIER À ANALYSER")
-        self.btn_select.clicked.connect(self._open_folder_dialog)
-        
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setStyleSheet("QProgressBar::chunk { background-color: #00f2ff; }")
-        
-        self.log_output = QLabel("Prêt pour l'analyse...")
-        self.log_output.setAlignment(Qt.AlignCenter)
-        
-        layout.addStretch()
-        layout.addWidget(self.btn_select)
-        layout.addWidget(self.progress_bar)
-        layout.addWidget(self.log_output)
-        layout.addStretch()
+        self.glow = QGraphicsDropShadowEffect()
+        self.glow.setBlurRadius(0)
+        self.glow.setColor(QColor(0, 242, 255))
+        self.status_label.setGraphicsEffect(self.glow)
 
-    def _setup_results_tab(self):
-        layout = QVBoxLayout(self.tab_results)
-        self.results_table = QTableWidget(0, 5)
-        self.results_table.setHorizontalHeaderLabels(["Fichier", "Clipping", "SNR", "Suspicion", "Verdict"])
-        layout.addWidget(self.results_table)
+        # Rapport LLM (Axe A)
+        self.llm_report = QLabel("Expertise : En attente d'analyse...")
+        self.llm_report.setWordWrap(True)
+        self.llm_report.setStyleSheet("background: #1A1C25; padding: 15px; border-radius: 5px; color: #BBBBBB;")
+        self.layout.addWidget(self.llm_report)
 
-    def _setup_revision_tab(self):
-        """L'onglet Expert avec Waveform & Spectrogramme."""
-        layout = QHBoxLayout(self.tab_revision)
-        
-        # Côté gauche : Liste des fichiers en zone grise
-        self.review_list = QTableWidget(0, 2)
-        layout.addWidget(self.review_list, 1)
-        
-        # Côté droit : Visualisation & Contrôles
-        viz_layout = QVBoxLayout()
-        
-        self.figure, (self.ax_wave, self.ax_spec) = plt.subplots(2, 1, figsize=(6, 8))
-        self.figure.patch.set_facecolor('#1a1a1a')
-        self.canvas = FigureCanvas(self.figure)
-        
-        viz_layout.addWidget(self.canvas)
-        
-        btn_layout = QHBoxLayout()
-        self.btn_good = QPushButton("✓ MARQUER COMME BON")
-        self.btn_good.setStyleSheet("background-color: #2ecc71; color: white;")
-        self.btn_ban = QPushButton("✗ BANNIR (FAUX HQ / DÉFAUT)")
-        self.btn_ban.setStyleSheet("background-color: #e74c3c; color: white;")
-        
-        btn_layout.addWidget(self.btn_good)
-        btn_layout.addWidget(self.btn_ban)
-        viz_layout.addLayout(btn_layout)
-        
-        layout.addLayout(viz_layout, 2)
+        # Inspection Spectrale (Axe B)
+        zoom_layout = QHBoxLayout()
+        zoom_layout.addWidget(QLabel("ZOOM SPECTRAL :"))
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setRange(5, 100)
+        self.zoom_slider.setValue(100)
+        self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
+        zoom_layout.addWidget(self.zoom_slider)
+        self.layout.addLayout(zoom_layout)
 
-    def _open_folder_dialog(self):
-        folder = QFileDialog.getExistingDirectory(self, "Sélectionner Dossier")
-        if folder:
-            self.request_scan.emit(folder)
+        # Zone de Contrôle (Axe C)
+        ctrl_layout = QHBoxLayout()
+        self.btn_valid = QPushButton("✅ SCORE CORRECT")
+        self.btn_fraud = QPushButton("❌ ERREUR IA")
+        self.btn_valid.clicked.connect(lambda: self.submit_feedback(True))
+        self.btn_fraud.clicked.connect(lambda: self.submit_feedback(False))
+        ctrl_layout.addWidget(self.btn_valid)
+        ctrl_layout.addWidget(self.btn_fraud)
+        self.layout.addLayout(ctrl_layout)
 
-    @Slot(dict)
-    def update_results(self, data):
-        """Met à jour le tableau des résultats en temps réel."""
-        row = self.results_table.rowCount()
-        self.results_table.insertRow(row)
-        self.results_table.setItem(row, 0, QTableWidgetItem(os.path.basename(data['path'])))
-        self.results_table.setItem(row, 1, QTableWidgetItem(f"{data['dsp']['clipping']:.2f}%"))
-        self.results_table.setItem(row, 2, QTableWidgetItem(f"{data['dsp']['snr']:.1f} dB"))
+    def handle_dsp_ready(self, res):
+        """Axe A : Affichage immédiat du spectrogramme."""
+        self.current_hash = res['hash']
+        self.status_label.setText(f"SCORE PRÉSUMÉ : {res['score']:.2f}")
         
-        score_item = QTableWidgetItem(f"{data['ml_score']:.2f}")
-        # Coloration dynamique selon suspicion
-        if data['ml_score'] > 0.7: score_item.setForeground(Qt.red)
-        elif data['ml_score'] < 0.4: score_item.setForeground(Qt.green)
-        
-        self.results_table.setItem(row, 3, QTableWidgetItem(score_item))
+        # Axe B : Création du cache image
+        matrix = res['matrix']
+        norm = ((matrix - matrix.min()) / (matrix.max() - matrix.min()) * 255).astype(np.uint8)
+        self._pixmap_cache = QImage(norm.data, norm.shape[1], norm.shape[0], norm.shape[1], QImage.Format_Grayscale8)
+        self._trigger_glow(res['score'] > 0.6)
 
-    @Slot(object, object)
-    def draw_visuals(self, times, waveform, spectrogram):
-        """Affiche les graphiques sans bloquer l'UI."""
-        self.ax_wave.clear()
-        self.ax_spec.clear()
-        
-        self.ax_wave.plot(times, waveform, color='#00f2ff', linewidth=0.5)
-        self.ax_wave.set_facecolor('#1a1a1a')
-        self.ax_wave.axis('off')
-        
-        self.ax_spec.imshow(spectrogram, aspect='auto', origin='lower', cmap='inferno')
-        self.ax_spec.axis('off')
-        
-        self.canvas.draw()
+    def handle_analysis_result(self, res):
+        """Mise à jour finale avec texte LLM."""
+        self.llm_report.setText(f"VERDICT LLM : {res['analysis_text'] or 'Analyse DSP Pure.'}")
+
+    def on_zoom_changed(self, val):
+        if self._pixmap_cache:
+            # Ici la logique de scale du pixmap natif
+            pass 
+
+    def submit_feedback(self, is_valid):
+        if self.current_hash:
+            self.feedback_given.emit(self.current_hash, is_valid)
+            self.status_label.setText("FEEDBACK ENREGISTRÉ")
+
+    def _trigger_glow(self, active):
+        if hasattr(self, 'anim'): self.anim.stop()
+        self.anim = QPropertyAnimation(self.glow, b"blurRadius")
+        self.anim.setEndValue(25 if active else 0)
+        self.anim.setDuration(800)
+        self.anim.start()
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls(): e.accept()
+    def dropEvent(self, e):
+        for url in e.mimeData().urls(): self.scan_requested.emit(url.toLocalFile())

@@ -1,1385 +1,1039 @@
-from functools import partial
-from collections import deque
+"""
+requests.models
+~~~~~~~~~~~~~~~
 
-from llvmlite import ir
+This module contains the primary objects that power Requests.
+"""
 
-from numba.core.datamodel.registry import register_default
-from numba.core import types, cgutils
-from numba.np import numpy_support
+import datetime
+
+# Import encoding now, to avoid implicit import later.
+# Implicit import within threads may cause LookupError when standard library is in a ZIP,
+# such as in Embedded Python. See https://github.com/psf/requests/issues/3578.
+import encodings.idna  # noqa: F401
+from io import UnsupportedOperation
+
+from urllib3.exceptions import (
+    DecodeError,
+    LocationParseError,
+    ProtocolError,
+    ReadTimeoutError,
+    SSLError,
+)
+from urllib3.fields import RequestField
+from urllib3.filepost import encode_multipart_formdata
+from urllib3.util import parse_url
+
+from ._internal_utils import to_native_string, unicode_is_ascii
+from .auth import HTTPBasicAuth
+from .compat import (
+    Callable,
+    JSONDecodeError,
+    Mapping,
+    basestring,
+    builtin_str,
+    chardet,
+    cookielib,
+)
+from .compat import json as complexjson
+from .compat import urlencode, urlsplit, urlunparse
+from .cookies import _copy_cookie_jar, cookiejar_from_dict, get_cookie_header
+from .exceptions import (
+    ChunkedEncodingError,
+    ConnectionError,
+    ContentDecodingError,
+    HTTPError,
+    InvalidJSONError,
+    InvalidURL,
+)
+from .exceptions import JSONDecodeError as RequestsJSONDecodeError
+from .exceptions import MissingSchema
+from .exceptions import SSLError as RequestsSSLError
+from .exceptions import StreamConsumedError
+from .hooks import default_hooks
+from .status_codes import codes
+from .structures import CaseInsensitiveDict
+from .utils import (
+    check_header_validity,
+    get_auth_from_url,
+    guess_filename,
+    guess_json_utf,
+    iter_slices,
+    parse_header_links,
+    requote_uri,
+    stream_decode_response_unicode,
+    super_len,
+    to_key_val_list,
+)
+
+#: The set of HTTP status codes that indicate an automatically
+#: processable redirect.
+REDIRECT_STATI = (
+    codes.moved,  # 301
+    codes.found,  # 302
+    codes.other,  # 303
+    codes.temporary_redirect,  # 307
+    codes.permanent_redirect,  # 308
+)
+
+DEFAULT_REDIRECT_LIMIT = 30
+CONTENT_CHUNK_SIZE = 10 * 1024
+ITER_CHUNK_SIZE = 512
 
 
-class DataModel(object):
-    """
-    DataModel describe how a FE type is represented in the LLVM IR at
-    different contexts.
-
-    Contexts are:
-
-    - value: representation inside function body.  Maybe stored in stack.
-    The representation here are flexible.
-
-    - data: representation used when storing into containers (e.g. arrays).
-
-    - argument: representation used for function argument.  All composite
-    types are unflattened into multiple primitive types.
-
-    - return: representation used for return argument.
-
-    Throughput the compiler pipeline, a LLVM value is usually passed around
-    in the "value" representation.  All "as_" prefix function converts from
-    "value" representation.  All "from_" prefix function converts to the
-    "value"  representation.
-
-    """
-    def __init__(self, dmm, fe_type):
-        self._dmm = dmm
-        self._fe_type = fe_type
-
+class RequestEncodingMixin:
     @property
-    def fe_type(self):
-        return self._fe_type
+    def path_url(self):
+        """Build the path URL to use."""
 
-    def get_value_type(self):
-        raise NotImplementedError(self)
+        url = []
 
-    def get_data_type(self):
-        return self.get_value_type()
+        p = urlsplit(self.url)
 
-    def get_argument_type(self):
-        """Return a LLVM type or nested tuple of LLVM type
+        path = p.path
+        if not path:
+            path = "/"
+
+        url.append(path)
+
+        query = p.query
+        if query:
+            url.append("?")
+            url.append(query)
+
+        return "".join(url)
+
+    @staticmethod
+    def _encode_params(data):
+        """Encode parameters in a piece of data.
+
+        Will successfully encode parameters when passed as a dict or a list of
+        2-tuples. Order is retained if data is a list of 2-tuples but arbitrary
+        if parameters are supplied as a dict.
         """
-        return self.get_value_type()
 
-    def get_return_type(self):
-        return self.get_value_type()
-
-    def as_data(self, builder, value):
-        raise NotImplementedError(self)
-
-    def as_argument(self, builder, value):
-        """
-        Takes one LLVM value
-        Return a LLVM value or nested tuple of LLVM value
-        """
-        raise NotImplementedError(self)
-
-    def as_return(self, builder, value):
-        raise NotImplementedError(self)
-
-    def from_data(self, builder, value):
-        raise NotImplementedError(self)
-
-    def from_argument(self, builder, value):
-        """
-        Takes a LLVM value or nested tuple of LLVM value
-        Returns one LLVM value
-        """
-        raise NotImplementedError(self)
-
-    def from_return(self, builder, value):
-        raise NotImplementedError(self)
-
-    def load_from_data_pointer(self, builder, ptr, align=None):
-        """
-        Load value from a pointer to data.
-        This is the default implementation, sufficient for most purposes.
-        """
-        return self.from_data(builder, builder.load(ptr, align=align))
-
-    def traverse(self, builder):
-        """
-        Traverse contained members.
-        Returns a iterable of contained (types, getters).
-        Each getter is a one-argument function accepting a LLVM value.
-        """
-        return []
-
-    def traverse_models(self):
-        """
-        Recursively list all models involved in this model.
-        """
-        return [self._dmm[t] for t in self.traverse_types()]
-
-    def traverse_types(self):
-        """
-        Recursively list all frontend types involved in this model.
-        """
-        types = [self._fe_type]
-        queue = deque([self])
-        while len(queue) > 0:
-            dm = queue.popleft()
-
-            for i_dm in dm.inner_models():
-                if i_dm._fe_type not in types:
-                    queue.append(i_dm)
-                    types.append(i_dm._fe_type)
-
-        return types
-
-    def inner_models(self):
-        """
-        List all *inner* models.
-        """
-        return []
-
-    def get_nrt_meminfo(self, builder, value):
-        """
-        Returns the MemInfo object or None if it is not tracked.
-        It is only defined for types.meminfo_pointer
-        """
-        return None
-
-    def has_nrt_meminfo(self):
-        return False
-
-    def contains_nrt_meminfo(self):
-        """
-        Recursively check all contained types for need for NRT meminfo.
-        """
-        return any(model.has_nrt_meminfo() for model in self.traverse_models())
-
-    def _compared_fields(self):
-        return (type(self), self._fe_type)
-
-    def __hash__(self):
-        return hash(tuple(self._compared_fields()))
-
-    def __eq__(self, other):
-        if type(self) is type(other):
-            return self._compared_fields() == other._compared_fields()
+        if isinstance(data, (str, bytes)):
+            return data
+        elif hasattr(data, "read"):
+            return data
+        elif hasattr(data, "__iter__"):
+            result = []
+            for k, vs in to_key_val_list(data):
+                if isinstance(vs, basestring) or not hasattr(vs, "__iter__"):
+                    vs = [vs]
+                for v in vs:
+                    if v is not None:
+                        result.append(
+                            (
+                                k.encode("utf-8") if isinstance(k, str) else k,
+                                v.encode("utf-8") if isinstance(v, str) else v,
+                            )
+                        )
+            return urlencode(result, doseq=True)
         else:
+            return data
+
+    @staticmethod
+    def _encode_files(files, data):
+        """Build the body for a multipart/form-data request.
+
+        Will successfully encode files when passed as a dict or a list of
+        tuples. Order is retained if data is a list of tuples but arbitrary
+        if parameters are supplied as a dict.
+        The tuples may be 2-tuples (filename, fileobj), 3-tuples (filename, fileobj, contentype)
+        or 4-tuples (filename, fileobj, contentype, custom_headers).
+        """
+        if not files:
+            raise ValueError("Files must be provided.")
+        elif isinstance(data, basestring):
+            raise ValueError("Data must not be a string.")
+
+        new_fields = []
+        fields = to_key_val_list(data or {})
+        files = to_key_val_list(files or {})
+
+        for field, val in fields:
+            if isinstance(val, basestring) or not hasattr(val, "__iter__"):
+                val = [val]
+            for v in val:
+                if v is not None:
+                    # Don't call str() on bytestrings: in Py3 it all goes wrong.
+                    if not isinstance(v, bytes):
+                        v = str(v)
+
+                    new_fields.append(
+                        (
+                            field.decode("utf-8")
+                            if isinstance(field, bytes)
+                            else field,
+                            v.encode("utf-8") if isinstance(v, str) else v,
+                        )
+                    )
+
+        for k, v in files:
+            # support for explicit filename
+            ft = None
+            fh = None
+            if isinstance(v, (tuple, list)):
+                if len(v) == 2:
+                    fn, fp = v
+                elif len(v) == 3:
+                    fn, fp, ft = v
+                else:
+                    fn, fp, ft, fh = v
+            else:
+                fn = guess_filename(v) or k
+                fp = v
+
+            if isinstance(fp, (str, bytes, bytearray)):
+                fdata = fp
+            elif hasattr(fp, "read"):
+                fdata = fp.read()
+            elif fp is None:
+                continue
+            else:
+                fdata = fp
+
+            rf = RequestField(name=k, data=fdata, filename=fn, headers=fh)
+            rf.make_multipart(content_type=ft)
+            new_fields.append(rf)
+
+        body, content_type = encode_multipart_formdata(new_fields)
+
+        return body, content_type
+
+
+class RequestHooksMixin:
+    def register_hook(self, event, hook):
+        """Properly register a hook."""
+
+        if event not in self.hooks:
+            raise ValueError(f'Unsupported event specified, with event name "{event}"')
+
+        if isinstance(hook, Callable):
+            self.hooks[event].append(hook)
+        elif hasattr(hook, "__iter__"):
+            self.hooks[event].extend(h for h in hook if isinstance(h, Callable))
+
+    def deregister_hook(self, event, hook):
+        """Deregister a previously registered hook.
+        Returns True if the hook existed, False if not.
+        """
+
+        try:
+            self.hooks[event].remove(hook)
+            return True
+        except ValueError:
             return False
 
-    def __ne__(self, other):
-        return not self.__eq__(other)
 
+class Request(RequestHooksMixin):
+    """A user-created :class:`Request <Request>` object.
 
-@register_default(types.Omitted)
-class OmittedArgDataModel(DataModel):
-    """
-    A data model for omitted arguments.  Only the "argument" representation
-    is defined, other representations raise a NotImplementedError.
-    """
-    # Omitted arguments are using a dummy value type
-    def get_value_type(self):
-        return ir.LiteralStructType([])
+    Used to prepare a :class:`PreparedRequest <PreparedRequest>`, which is sent to the server.
 
-    # Omitted arguments don't produce any LLVM function argument.
-    def get_argument_type(self):
-        return ()
+    :param method: HTTP method to use.
+    :param url: URL to send.
+    :param headers: dictionary of headers to send.
+    :param files: dictionary of {filename: fileobject} files to multipart upload.
+    :param data: the body to attach to the request. If a dictionary or
+        list of tuples ``[(key, value)]`` is provided, form-encoding will
+        take place.
+    :param json: json for the body to attach to the request (if files or data is not specified).
+    :param params: URL parameters to append to the URL. If a dictionary or
+        list of tuples ``[(key, value)]`` is provided, form-encoding will
+        take place.
+    :param auth: Auth handler or (user, pass) tuple.
+    :param cookies: dictionary or CookieJar of cookies to attach to this request.
+    :param hooks: dictionary of callback hooks, for internal usage.
 
-    def as_argument(self, builder, val):
-        return ()
+    Usage::
 
-    def from_argument(self, builder, val):
-        assert val == (), val
-        return None
-
-
-@register_default(types.Boolean)
-@register_default(types.BooleanLiteral)
-class BooleanModel(DataModel):
-    _bit_type = ir.IntType(1)
-    _byte_type = ir.IntType(8)
-
-    def get_value_type(self):
-        return self._bit_type
-
-    def get_data_type(self):
-        return self._byte_type
-
-    def get_return_type(self):
-        return self.get_data_type()
-
-    def get_argument_type(self):
-        return self.get_data_type()
-
-    def as_data(self, builder, value):
-        return builder.zext(value, self.get_data_type())
-
-    def as_argument(self, builder, value):
-        return self.as_data(builder, value)
-
-    def as_return(self, builder, value):
-        return self.as_data(builder, value)
-
-    def from_data(self, builder, value):
-        ty = self.get_value_type()
-        resalloca = cgutils.alloca_once(builder, ty)
-        cond = builder.icmp_unsigned('==', value, value.type(0))
-        with builder.if_else(cond) as (then, otherwise):
-            with then:
-                builder.store(ty(0), resalloca)
-            with otherwise:
-                builder.store(ty(1), resalloca)
-        return builder.load(resalloca)
-
-    def from_argument(self, builder, value):
-        return self.from_data(builder, value)
-
-    def from_return(self, builder, value):
-        return self.from_data(builder, value)
-
-
-class PrimitiveModel(DataModel):
-    """A primitive type can be represented natively in the target in all
-    usage contexts.
+      >>> import requests
+      >>> req = requests.Request('GET', 'https://httpbin.org/get')
+      >>> req.prepare()
+      <PreparedRequest [GET]>
     """
 
-    def __init__(self, dmm, fe_type, be_type):
-        super(PrimitiveModel, self).__init__(dmm, fe_type)
-        self.be_type = be_type
+    def __init__(
+        self,
+        method=None,
+        url=None,
+        headers=None,
+        files=None,
+        data=None,
+        params=None,
+        auth=None,
+        cookies=None,
+        hooks=None,
+        json=None,
+    ):
+        # Default empty dicts for dict params.
+        data = [] if data is None else data
+        files = [] if files is None else files
+        headers = {} if headers is None else headers
+        params = {} if params is None else params
+        hooks = {} if hooks is None else hooks
 
-    def get_value_type(self):
-        return self.be_type
+        self.hooks = default_hooks()
+        for k, v in list(hooks.items()):
+            self.register_hook(event=k, hook=v)
 
-    def as_data(self, builder, value):
-        return value
+        self.method = method
+        self.url = url
+        self.headers = headers
+        self.files = files
+        self.data = data
+        self.json = json
+        self.params = params
+        self.auth = auth
+        self.cookies = cookies
 
-    def as_argument(self, builder, value):
-        return value
+    def __repr__(self):
+        return f"<Request [{self.method}]>"
 
-    def as_return(self, builder, value):
-        return value
+    def prepare(self):
+        """Constructs a :class:`PreparedRequest <PreparedRequest>` for transmission and returns it."""
+        p = PreparedRequest()
+        p.prepare(
+            method=self.method,
+            url=self.url,
+            headers=self.headers,
+            files=self.files,
+            data=self.data,
+            json=self.json,
+            params=self.params,
+            auth=self.auth,
+            cookies=self.cookies,
+            hooks=self.hooks,
+        )
+        return p
 
-    def from_data(self, builder, value):
-        return value
 
-    def from_argument(self, builder, value):
-        return value
+class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
+    """The fully mutable :class:`PreparedRequest <PreparedRequest>` object,
+    containing the exact bytes that will be sent to the server.
 
-    def from_return(self, builder, value):
-        return value
+    Instances are generated from a :class:`Request <Request>` object, and
+    should not be instantiated manually; doing so may produce undesirable
+    effects.
 
+    Usage::
 
-class ProxyModel(DataModel):
+      >>> import requests
+      >>> req = requests.Request('GET', 'https://httpbin.org/get')
+      >>> r = req.prepare()
+      >>> r
+      <PreparedRequest [GET]>
+
+      >>> s = requests.Session()
+      >>> s.send(r)
+      <Response [200]>
     """
-    Helper class for models which delegate to another model.
+
+    def __init__(self):
+        #: HTTP verb to send to the server.
+        self.method = None
+        #: HTTP URL to send the request to.
+        self.url = None
+        #: dictionary of HTTP headers.
+        self.headers = None
+        # The `CookieJar` used to create the Cookie header will be stored here
+        # after prepare_cookies is called
+        self._cookies = None
+        #: request body to send to the server.
+        self.body = None
+        #: dictionary of callback hooks, for internal usage.
+        self.hooks = default_hooks()
+        #: integer denoting starting position of a readable file-like body.
+        self._body_position = None
+
+    def prepare(
+        self,
+        method=None,
+        url=None,
+        headers=None,
+        files=None,
+        data=None,
+        params=None,
+        auth=None,
+        cookies=None,
+        hooks=None,
+        json=None,
+    ):
+        """Prepares the entire request with the given parameters."""
+
+        self.prepare_method(method)
+        self.prepare_url(url, params)
+        self.prepare_headers(headers)
+        self.prepare_cookies(cookies)
+        self.prepare_body(data, files, json)
+        self.prepare_auth(auth, url)
+
+        # Note that prepare_auth must be last to enable authentication schemes
+        # such as OAuth to work on a fully prepared request.
+
+        # This MUST go after prepare_auth. Authenticators could add a hook
+        self.prepare_hooks(hooks)
+
+    def __repr__(self):
+        return f"<PreparedRequest [{self.method}]>"
+
+    def copy(self):
+        p = PreparedRequest()
+        p.method = self.method
+        p.url = self.url
+        p.headers = self.headers.copy() if self.headers is not None else None
+        p._cookies = _copy_cookie_jar(self._cookies)
+        p.body = self.body
+        p.hooks = self.hooks
+        p._body_position = self._body_position
+        return p
+
+    def prepare_method(self, method):
+        """Prepares the given HTTP method."""
+        self.method = method
+        if self.method is not None:
+            self.method = to_native_string(self.method.upper())
+
+    @staticmethod
+    def _get_idna_encoded_host(host):
+        import idna
+
+        try:
+            host = idna.encode(host, uts46=True).decode("utf-8")
+        except idna.IDNAError:
+            raise UnicodeError
+        return host
+
+    def prepare_url(self, url, params):
+        """Prepares the given HTTP URL."""
+        #: Accept objects that have string representations.
+        #: We're unable to blindly call unicode/str functions
+        #: as this will include the bytestring indicator (b'')
+        #: on python 3.x.
+        #: https://github.com/psf/requests/pull/2238
+        if isinstance(url, bytes):
+            url = url.decode("utf8")
+        else:
+            url = str(url)
+
+        # Remove leading whitespaces from url
+        url = url.lstrip()
+
+        # Don't do any URL preparation for non-HTTP schemes like `mailto`,
+        # `data` etc to work around exceptions from `url_parse`, which
+        # handles RFC 3986 only.
+        if ":" in url and not url.lower().startswith("http"):
+            self.url = url
+            return
+
+        # Support for unicode domain names and paths.
+        try:
+            scheme, auth, host, port, path, query, fragment = parse_url(url)
+        except LocationParseError as e:
+            raise InvalidURL(*e.args)
+
+        if not scheme:
+            raise MissingSchema(
+                f"Invalid URL {url!r}: No scheme supplied. "
+                f"Perhaps you meant https://{url}?"
+            )
+
+        if not host:
+            raise InvalidURL(f"Invalid URL {url!r}: No host supplied")
+
+        # In general, we want to try IDNA encoding the hostname if the string contains
+        # non-ASCII characters. This allows users to automatically get the correct IDNA
+        # behaviour. For strings containing only ASCII characters, we need to also verify
+        # it doesn't start with a wildcard (*), before allowing the unencoded hostname.
+        if not unicode_is_ascii(host):
+            try:
+                host = self._get_idna_encoded_host(host)
+            except UnicodeError:
+                raise InvalidURL("URL has an invalid label.")
+        elif host.startswith(("*", ".")):
+            raise InvalidURL("URL has an invalid label.")
+
+        # Carefully reconstruct the network location
+        netloc = auth or ""
+        if netloc:
+            netloc += "@"
+        netloc += host
+        if port:
+            netloc += f":{port}"
+
+        # Bare domains aren't valid URLs.
+        if not path:
+            path = "/"
+
+        if isinstance(params, (str, bytes)):
+            params = to_native_string(params)
+
+        enc_params = self._encode_params(params)
+        if enc_params:
+            if query:
+                query = f"{query}&{enc_params}"
+            else:
+                query = enc_params
+
+        url = requote_uri(urlunparse([scheme, netloc, path, None, query, fragment]))
+        self.url = url
+
+    def prepare_headers(self, headers):
+        """Prepares the given HTTP headers."""
+
+        self.headers = CaseInsensitiveDict()
+        if headers:
+            for header in headers.items():
+                # Raise exception on invalid header value.
+                check_header_validity(header)
+                name, value = header
+                self.headers[to_native_string(name)] = value
+
+    def prepare_body(self, data, files, json=None):
+        """Prepares the given HTTP body data."""
+
+        # Check if file, fo, generator, iterator.
+        # If not, run through normal process.
+
+        # Nottin' on you.
+        body = None
+        content_type = None
+
+        if not data and json is not None:
+            # urllib3 requires a bytes-like body. Python 2's json.dumps
+            # provides this natively, but Python 3 gives a Unicode string.
+            content_type = "application/json"
+
+            try:
+                body = complexjson.dumps(json, allow_nan=False)
+            except ValueError as ve:
+                raise InvalidJSONError(ve, request=self)
+
+            if not isinstance(body, bytes):
+                body = body.encode("utf-8")
+
+        is_stream = all(
+            [
+                hasattr(data, "__iter__"),
+                not isinstance(data, (basestring, list, tuple, Mapping)),
+            ]
+        )
+
+        if is_stream:
+            try:
+                length = super_len(data)
+            except (TypeError, AttributeError, UnsupportedOperation):
+                length = None
+
+            body = data
+
+            if getattr(body, "tell", None) is not None:
+                # Record the current file position before reading.
+                # This will allow us to rewind a file in the event
+                # of a redirect.
+                try:
+                    self._body_position = body.tell()
+                except OSError:
+                    # This differentiates from None, allowing us to catch
+                    # a failed `tell()` later when trying to rewind the body
+                    self._body_position = object()
+
+            if files:
+                raise NotImplementedError(
+                    "Streamed bodies and files are mutually exclusive."
+                )
+
+            if length:
+                self.headers["Content-Length"] = builtin_str(length)
+            else:
+                self.headers["Transfer-Encoding"] = "chunked"
+        else:
+            # Multi-part file uploads.
+            if files:
+                (body, content_type) = self._encode_files(files, data)
+            else:
+                if data:
+                    body = self._encode_params(data)
+                    if isinstance(data, basestring) or hasattr(data, "read"):
+                        content_type = None
+                    else:
+                        content_type = "application/x-www-form-urlencoded"
+
+            self.prepare_content_length(body)
+
+            # Add content-type if it wasn't explicitly provided.
+            if content_type and ("content-type" not in self.headers):
+                self.headers["Content-Type"] = content_type
+
+        self.body = body
+
+    def prepare_content_length(self, body):
+        """Prepare Content-Length header based on request method and body"""
+        if body is not None:
+            length = super_len(body)
+            if length:
+                # If length exists, set it. Otherwise, we fallback
+                # to Transfer-Encoding: chunked.
+                self.headers["Content-Length"] = builtin_str(length)
+        elif (
+            self.method not in ("GET", "HEAD")
+            and self.headers.get("Content-Length") is None
+        ):
+            # Set Content-Length to 0 for methods that can have a body
+            # but don't provide one. (i.e. not GET or HEAD)
+            self.headers["Content-Length"] = "0"
+
+    def prepare_auth(self, auth, url=""):
+        """Prepares the given HTTP auth data."""
+
+        # If no Auth is explicitly provided, extract it from the URL first.
+        if auth is None:
+            url_auth = get_auth_from_url(self.url)
+            auth = url_auth if any(url_auth) else None
+
+        if auth:
+            if isinstance(auth, tuple) and len(auth) == 2:
+                # special-case basic HTTP auth
+                auth = HTTPBasicAuth(*auth)
+
+            # Allow auth to make its changes.
+            r = auth(self)
+
+            # Update self to reflect the auth changes.
+            self.__dict__.update(r.__dict__)
+
+            # Recompute Content-Length
+            self.prepare_content_length(self.body)
+
+    def prepare_cookies(self, cookies):
+        """Prepares the given HTTP cookie data.
+
+        This function eventually generates a ``Cookie`` header from the
+        given cookies using cookielib. Due to cookielib's design, the header
+        will not be regenerated if it already exists, meaning this function
+        can only be called once for the life of the
+        :class:`PreparedRequest <PreparedRequest>` object. Any subsequent calls
+        to ``prepare_cookies`` will have no actual effect, unless the "Cookie"
+        header is removed beforehand.
+        """
+        if isinstance(cookies, cookielib.CookieJar):
+            self._cookies = cookies
+        else:
+            self._cookies = cookiejar_from_dict(cookies)
+
+        cookie_header = get_cookie_header(self._cookies, self)
+        if cookie_header is not None:
+            self.headers["Cookie"] = cookie_header
+
+    def prepare_hooks(self, hooks):
+        """Prepares the given hooks."""
+        # hooks can be passed as None to the prepare method and to this
+        # method. To prevent iterating over None, simply use an empty list
+        # if hooks is False-y
+        hooks = hooks or []
+        for event in hooks:
+            self.register_hook(event, hooks[event])
+
+
+class Response:
+    """The :class:`Response <Response>` object, which contains a
+    server's response to an HTTP request.
     """
 
-    def get_value_type(self):
-        return self._proxied_model.get_value_type()
+    __attrs__ = [
+        "_content",
+        "status_code",
+        "headers",
+        "url",
+        "history",
+        "encoding",
+        "reason",
+        "cookies",
+        "elapsed",
+        "request",
+    ]
 
-    def get_data_type(self):
-        return self._proxied_model.get_data_type()
+    def __init__(self):
+        self._content = False
+        self._content_consumed = False
+        self._next = None
 
-    def get_return_type(self):
-        return self._proxied_model.get_return_type()
+        #: Integer Code of responded HTTP Status, e.g. 404 or 200.
+        self.status_code = None
 
-    def get_argument_type(self):
-        return self._proxied_model.get_argument_type()
+        #: Case-insensitive Dictionary of Response Headers.
+        #: For example, ``headers['content-encoding']`` will return the
+        #: value of a ``'Content-Encoding'`` response header.
+        self.headers = CaseInsensitiveDict()
 
-    def as_data(self, builder, value):
-        return self._proxied_model.as_data(builder, value)
+        #: File-like object representation of response (for advanced usage).
+        #: Use of ``raw`` requires that ``stream=True`` be set on the request.
+        #: This requirement does not apply for use internally to Requests.
+        self.raw = None
 
-    def as_argument(self, builder, value):
-        return self._proxied_model.as_argument(builder, value)
+        #: Final URL location of Response.
+        self.url = None
 
-    def as_return(self, builder, value):
-        return self._proxied_model.as_return(builder, value)
+        #: Encoding to decode with when accessing r.text.
+        self.encoding = None
 
-    def from_data(self, builder, value):
-        return self._proxied_model.from_data(builder, value)
+        #: A list of :class:`Response <Response>` objects from
+        #: the history of the Request. Any redirect responses will end
+        #: up here. The list is sorted from the oldest to the most recent request.
+        self.history = []
 
-    def from_argument(self, builder, value):
-        return self._proxied_model.from_argument(builder, value)
+        #: Textual reason of responded HTTP Status, e.g. "Not Found" or "OK".
+        self.reason = None
 
-    def from_return(self, builder, value):
-        return self._proxied_model.from_return(builder, value)
+        #: A CookieJar of Cookies the server sent back.
+        self.cookies = cookiejar_from_dict({})
 
+        #: The amount of time elapsed between sending the request
+        #: and the arrival of the response (as a timedelta).
+        #: This property specifically measures the time taken between sending
+        #: the first byte of the request and finishing parsing the headers. It
+        #: is therefore unaffected by consuming the response content or the
+        #: value of the ``stream`` keyword argument.
+        self.elapsed = datetime.timedelta(0)
 
-@register_default(types.EnumMember)
-@register_default(types.IntEnumMember)
-class EnumModel(ProxyModel):
-    """
-    Enum members are represented exactly like their values.
-    """
-    def __init__(self, dmm, fe_type):
-        super(EnumModel, self).__init__(dmm, fe_type)
-        self._proxied_model = dmm.lookup(fe_type.dtype)
+        #: The :class:`PreparedRequest <PreparedRequest>` object to which this
+        #: is a response.
+        self.request = None
 
+    def __enter__(self):
+        return self
 
-@register_default(types.Opaque)
-@register_default(types.PyObject)
-@register_default(types.RawPointer)
-@register_default(types.NoneType)
-@register_default(types.StringLiteral)
-@register_default(types.EllipsisType)
-@register_default(types.Function)
-@register_default(types.Type)
-@register_default(types.Object)
-@register_default(types.Module)
-@register_default(types.Phantom)
-@register_default(types.UndefVar)
-@register_default(types.ContextManager)
-@register_default(types.Dispatcher)
-@register_default(types.ObjModeDispatcher)
-@register_default(types.ExceptionClass)
-@register_default(types.Dummy)
-@register_default(types.ExceptionInstance)
-@register_default(types.ExternalFunction)
-@register_default(types.EnumClass)
-@register_default(types.IntEnumClass)
-@register_default(types.NumberClass)
-@register_default(types.TypeRef)
-@register_default(types.NamedTupleClass)
-@register_default(types.DType)
-@register_default(types.RecursiveCall)
-@register_default(types.MakeFunctionLiteral)
-@register_default(types.Poison)
-class OpaqueModel(PrimitiveModel):
-    """
-    Passed as opaque pointers
-    """
-    _ptr_type = ir.IntType(8).as_pointer()
+    def __exit__(self, *args):
+        self.close()
 
-    def __init__(self, dmm, fe_type):
-        be_type = self._ptr_type
-        super(OpaqueModel, self).__init__(dmm, fe_type, be_type)
+    def __getstate__(self):
+        # Consume everything; accessing the content attribute makes
+        # sure the content has been fully read.
+        if not self._content_consumed:
+            self.content
 
+        return {attr: getattr(self, attr, None) for attr in self.__attrs__}
 
-@register_default(types.MemInfoPointer)
-class MemInfoModel(OpaqueModel):
+    def __setstate__(self, state):
+        for name, value in state.items():
+            setattr(self, name, value)
 
-    def inner_models(self):
-        return [self._dmm.lookup(self._fe_type.dtype)]
+        # pickled objects do not have .raw
+        setattr(self, "_content_consumed", True)
+        setattr(self, "raw", None)
 
-    def has_nrt_meminfo(self):
+    def __repr__(self):
+        return f"<Response [{self.status_code}]>"
+
+    def __bool__(self):
+        """Returns True if :attr:`status_code` is less than 400.
+
+        This attribute checks if the status code of the response is between
+        400 and 600 to see if there was a client error or a server error. If
+        the status code, is between 200 and 400, this will return True. This
+        is **not** a check to see if the response code is ``200 OK``.
+        """
+        return self.ok
+
+    def __nonzero__(self):
+        """Returns True if :attr:`status_code` is less than 400.
+
+        This attribute checks if the status code of the response is between
+        400 and 600 to see if there was a client error or a server error. If
+        the status code, is between 200 and 400, this will return True. This
+        is **not** a check to see if the response code is ``200 OK``.
+        """
+        return self.ok
+
+    def __iter__(self):
+        """Allows you to use a response as an iterator."""
+        return self.iter_content(128)
+
+    @property
+    def ok(self):
+        """Returns True if :attr:`status_code` is less than 400, False if not.
+
+        This attribute checks if the status code of the response is between
+        400 and 600 to see if there was a client error or a server error. If
+        the status code is between 200 and 400, this will return True. This
+        is **not** a check to see if the response code is ``200 OK``.
+        """
+        try:
+            self.raise_for_status()
+        except HTTPError:
+            return False
         return True
 
-    def get_nrt_meminfo(self, builder, value):
-        return value
-
-
-@register_default(types.Integer)
-@register_default(types.IntegerLiteral)
-class IntegerModel(PrimitiveModel):
-    def __init__(self, dmm, fe_type):
-        be_type = ir.IntType(fe_type.bitwidth)
-        super(IntegerModel, self).__init__(dmm, fe_type, be_type)
-
-
-@register_default(types.Float)
-class FloatModel(PrimitiveModel):
-    def __init__(self, dmm, fe_type):
-        if fe_type == types.float32:
-            be_type = ir.FloatType()
-        elif fe_type == types.float64:
-            be_type = ir.DoubleType()
-        else:
-            raise NotImplementedError(fe_type)
-        super(FloatModel, self).__init__(dmm, fe_type, be_type)
-
-
-@register_default(types.CPointer)
-class PointerModel(PrimitiveModel):
-    def __init__(self, dmm, fe_type):
-        self._pointee_model = dmm.lookup(fe_type.dtype)
-        self._pointee_be_type = self._pointee_model.get_data_type()
-        be_type = self._pointee_be_type.as_pointer()
-        super(PointerModel, self).__init__(dmm, fe_type, be_type)
-
-
-@register_default(types.EphemeralPointer)
-class EphemeralPointerModel(PointerModel):
-
-    def get_data_type(self):
-        return self._pointee_be_type
-
-    def as_data(self, builder, value):
-        value = builder.load(value)
-        return self._pointee_model.as_data(builder, value)
-
-    def from_data(self, builder, value):
-        raise NotImplementedError("use load_from_data_pointer() instead")
-
-    def load_from_data_pointer(self, builder, ptr, align=None):
-        return builder.bitcast(ptr, self.get_value_type())
-
-
-@register_default(types.EphemeralArray)
-class EphemeralArrayModel(PointerModel):
-
-    def __init__(self, dmm, fe_type):
-        super(EphemeralArrayModel, self).__init__(dmm, fe_type)
-        self._data_type = ir.ArrayType(self._pointee_be_type,
-                                       self._fe_type.count)
-
-    def get_data_type(self):
-        return self._data_type
-
-    def as_data(self, builder, value):
-        values = [builder.load(cgutils.gep_inbounds(builder, value, i))
-                  for i in range(self._fe_type.count)]
-        return cgutils.pack_array(builder, values)
-
-    def from_data(self, builder, value):
-        raise NotImplementedError("use load_from_data_pointer() instead")
-
-    def load_from_data_pointer(self, builder, ptr, align=None):
-        return builder.bitcast(ptr, self.get_value_type())
-
-
-@register_default(types.ExternalFunctionPointer)
-class ExternalFuncPointerModel(PrimitiveModel):
-    def __init__(self, dmm, fe_type):
-        sig = fe_type.sig
-        # Since the function is non-Numba, there is no adaptation
-        # of arguments and return value, hence get_value_type().
-        retty = dmm.lookup(sig.return_type).get_value_type()
-        args = [dmm.lookup(t).get_value_type() for t in sig.args]
-        be_type = ir.PointerType(ir.FunctionType(retty, args))
-        super(ExternalFuncPointerModel, self).__init__(dmm, fe_type, be_type)
-
-
-@register_default(types.UniTuple)
-@register_default(types.NamedUniTuple)
-@register_default(types.StarArgUniTuple)
-class UniTupleModel(DataModel):
-    def __init__(self, dmm, fe_type):
-        super(UniTupleModel, self).__init__(dmm, fe_type)
-        self._elem_model = dmm.lookup(fe_type.dtype)
-        self._count = len(fe_type)
-        self._value_type = ir.ArrayType(self._elem_model.get_value_type(),
-                                        self._count)
-        self._data_type = ir.ArrayType(self._elem_model.get_data_type(),
-                                       self._count)
-
-    def get_value_type(self):
-        return self._value_type
-
-    def get_data_type(self):
-        return self._data_type
-
-    def get_return_type(self):
-        return self.get_value_type()
-
-    def get_argument_type(self):
-        return (self._elem_model.get_argument_type(),) * self._count
-
-    def as_argument(self, builder, value):
-        out = []
-        for i in range(self._count):
-            v = builder.extract_value(value, [i])
-            v = self._elem_model.as_argument(builder, v)
-            out.append(v)
-        return out
-
-    def from_argument(self, builder, value):
-        out = ir.Constant(self.get_value_type(), ir.Undefined)
-        for i, v in enumerate(value):
-            v = self._elem_model.from_argument(builder, v)
-            out = builder.insert_value(out, v, [i])
-        return out
-
-    def as_data(self, builder, value):
-        out = ir.Constant(self.get_data_type(), ir.Undefined)
-        for i in range(self._count):
-            val = builder.extract_value(value, [i])
-            dval = self._elem_model.as_data(builder, val)
-            out = builder.insert_value(out, dval, [i])
-        return out
-
-    def from_data(self, builder, value):
-        out = ir.Constant(self.get_value_type(), ir.Undefined)
-        for i in range(self._count):
-            val = builder.extract_value(value, [i])
-            dval = self._elem_model.from_data(builder, val)
-            out = builder.insert_value(out, dval, [i])
-        return out
-
-    def as_return(self, builder, value):
-        return value
-
-    def from_return(self, builder, value):
-        return value
-
-    def traverse(self, builder):
-        def getter(i, value):
-            return builder.extract_value(value, i)
-        return [(self._fe_type.dtype, partial(getter, i))
-                for i in range(self._count)]
-
-    def inner_models(self):
-        return [self._elem_model]
-
-
-class CompositeModel(DataModel):
-    """Any model that is composed of multiple other models should subclass from
-    this.
-    """
-    pass
-
-
-class StructModel(CompositeModel):
-    _value_type = None
-    _data_type = None
-
-    def __init__(self, dmm, fe_type, members):
-        super(StructModel, self).__init__(dmm, fe_type)
-        if members:
-            self._fields, self._members = zip(*members)
-        else:
-            self._fields = self._members = ()
-        self._models = tuple([self._dmm.lookup(t) for t in self._members])
-
-    def get_member_fe_type(self, name):
+    @property
+    def is_redirect(self):
+        """True if this Response is a well-formed HTTP redirect that could have
+        been processed automatically (by :meth:`Session.resolve_redirects`).
         """
-        StructModel-specific: get the Numba type of the field named *name*.
-        """
-        pos = self.get_field_position(name)
-        return self._members[pos]
-
-    def get_value_type(self):
-        if self._value_type is None:
-            self._value_type = ir.LiteralStructType([t.get_value_type()
-                                                    for t in self._models])
-        return self._value_type
-
-    def get_data_type(self):
-        if self._data_type is None:
-            self._data_type = ir.LiteralStructType([t.get_data_type()
-                                                    for t in self._models])
-        return self._data_type
-
-    def get_argument_type(self):
-        return tuple([t.get_argument_type() for t in self._models])
-
-    def get_return_type(self):
-        return self.get_data_type()
-
-    def _as(self, methname, builder, value):
-        extracted = []
-        for i, dm in enumerate(self._models):
-            extracted.append(getattr(dm, methname)(builder,
-                                                   self.get(builder, value, i)))
-        return tuple(extracted)
-
-    def _from(self, methname, builder, value):
-        struct = ir.Constant(self.get_value_type(), ir.Undefined)
-
-        for i, (dm, val) in enumerate(zip(self._models, value)):
-            v = getattr(dm, methname)(builder, val)
-            struct = self.set(builder, struct, v, i)
-
-        return struct
-
-    def as_data(self, builder, value):
-        """
-        Converts the LLVM struct in `value` into a representation suited for
-        storing into arrays.
-
-        Note
-        ----
-        Current implementation rarely changes how types are represented for
-        "value" and "data".  This is usually a pointless rebuild of the
-        immutable LLVM struct value.  Luckily, LLVM optimization removes all
-        redundancy.
-
-        Sample usecase: Structures nested with pointers to other structures
-        that can be serialized into  a flat representation when storing into
-        array.
-        """
-        elems = self._as("as_data", builder, value)
-        struct = ir.Constant(self.get_data_type(), ir.Undefined)
-        for i, el in enumerate(elems):
-            struct = builder.insert_value(struct, el, [i])
-        return struct
-
-    def from_data(self, builder, value):
-        """
-        Convert from "data" representation back into "value" representation.
-        Usually invoked when loading from array.
-
-        See notes in `as_data()`
-        """
-        vals = [builder.extract_value(value, [i])
-                for i in range(len(self._members))]
-        return self._from("from_data", builder, vals)
-
-    def load_from_data_pointer(self, builder, ptr, align=None):
-        values = []
-        for i, model in enumerate(self._models):
-            elem_ptr = cgutils.gep_inbounds(builder, ptr, 0, i)
-            val = model.load_from_data_pointer(builder, elem_ptr, align)
-            values.append(val)
-
-        struct = ir.Constant(self.get_value_type(), ir.Undefined)
-        for i, val in enumerate(values):
-            struct = self.set(builder, struct, val, i)
-        return struct
-
-    def as_argument(self, builder, value):
-        return self._as("as_argument", builder, value)
-
-    def from_argument(self, builder, value):
-        return self._from("from_argument", builder, value)
-
-    def as_return(self, builder, value):
-        elems = self._as("as_data", builder, value)
-        struct = ir.Constant(self.get_data_type(), ir.Undefined)
-        for i, el in enumerate(elems):
-            struct = builder.insert_value(struct, el, [i])
-        return struct
-
-    def from_return(self, builder, value):
-        vals = [builder.extract_value(value, [i])
-                for i in range(len(self._members))]
-        return self._from("from_data", builder, vals)
-
-    def get(self, builder, val, pos):
-        """Get a field at the given position or the fieldname
-
-        Args
-        ----
-        builder:
-            LLVM IRBuilder
-        val:
-            value to be inserted
-        pos: int or str
-            field index or field name
-
-        Returns
-        -------
-        Extracted value
-        """
-        if isinstance(pos, str):
-            pos = self.get_field_position(pos)
-        return builder.extract_value(val, [pos],
-                                     name="extracted." + self._fields[pos])
-
-    def set(self, builder, stval, val, pos):
-        """Set a field at the given position or the fieldname
-
-        Args
-        ----
-        builder:
-            LLVM IRBuilder
-        stval:
-            LLVM struct value
-        val:
-            value to be inserted
-        pos: int or str
-            field index or field name
-
-        Returns
-        -------
-        A new LLVM struct with the value inserted
-        """
-        if isinstance(pos, str):
-            pos = self.get_field_position(pos)
-        return builder.insert_value(stval, val, [pos],
-                                    name="inserted." + self._fields[pos])
-
-    def get_field_position(self, field):
-        try:
-            return self._fields.index(field)
-        except ValueError:
-            raise KeyError("%s does not have a field named %r"
-                           % (self.__class__.__name__, field))
+        return "location" in self.headers and self.status_code in REDIRECT_STATI
 
     @property
-    def field_count(self):
-        return len(self._fields)
+    def is_permanent_redirect(self):
+        """True if this Response one of the permanent versions of redirect."""
+        return "location" in self.headers and self.status_code in (
+            codes.moved_permanently,
+            codes.permanent_redirect,
+        )
 
-    def get_type(self, pos):
-        """Get the frontend type (numba type) of a field given the position
-         or the fieldname
+    @property
+    def next(self):
+        """Returns a PreparedRequest for the next request in a redirect chain, if there is one."""
+        return self._next
 
-        Args
-        ----
-        pos: int or str
-            field index or field name
+    @property
+    def apparent_encoding(self):
+        """The apparent encoding, provided by the charset_normalizer or chardet libraries."""
+        if chardet is not None:
+            return chardet.detect(self.content)["encoding"]
+        else:
+            # If no character detection library is available, we'll fall back
+            # to a standard Python utf-8 str.
+            return "utf-8"
+
+    def iter_content(self, chunk_size=1, decode_unicode=False):
+        """Iterates over the response data.  When stream=True is set on the
+        request, this avoids reading the content at once into memory for
+        large responses.  The chunk size is the number of bytes it should
+        read into memory.  This is not necessarily the length of each item
+        returned as decoding can take place.
+
+        chunk_size must be of type int or None. A value of None will
+        function differently depending on the value of `stream`.
+        stream=True will read data as it arrives in whatever size the
+        chunks are received. If stream=False, data is returned as
+        a single chunk.
+
+        If decode_unicode is True, content will be decoded using the best
+        available encoding based on the response.
         """
-        if isinstance(pos, str):
-            pos = self.get_field_position(pos)
-        return self._members[pos]
 
-    def get_model(self, pos):
-        """
-        Get the datamodel of a field given the position or the fieldname.
-
-        Args
-        ----
-        pos: int or str
-            field index or field name
-        """
-        return self._models[pos]
-
-    def traverse(self, builder):
-        def getter(k, value):
-            if value.type != self.get_value_type():
-                args = self.get_value_type(), value.type
-                raise TypeError("expecting {0} but got {1}".format(*args))
-            return self.get(builder, value, k)
-
-        return [(self.get_type(k), partial(getter, k)) for k in self._fields]
-
-    def inner_models(self):
-        return self._models
-
-
-@register_default(types.Complex)
-class ComplexModel(StructModel):
-    _element_type = NotImplemented
-
-    def __init__(self, dmm, fe_type):
-        members = [
-            ('real', fe_type.underlying_float),
-            ('imag', fe_type.underlying_float),
-        ]
-        super(ComplexModel, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.LiteralList)
-@register_default(types.LiteralStrKeyDict)
-@register_default(types.Tuple)
-@register_default(types.NamedTuple)
-@register_default(types.StarArgTuple)
-class TupleModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        members = [('f' + str(i), t) for i, t in enumerate(fe_type)]
-        super(TupleModel, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.UnionType)
-class UnionModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        members = [
-            ('tag', types.uintp),
-            # XXX: it should really be a MemInfoPointer(types.voidptr)
-            ('payload', types.Tuple.from_types(fe_type.types)),
-        ]
-        super(UnionModel, self).__init__(dmm, fe_type, members)
-
-
-
-@register_default(types.Pair)
-class PairModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        members = [('first', fe_type.first_type),
-                   ('second', fe_type.second_type)]
-        super(PairModel, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.ListPayload)
-class ListPayloadModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        # The fields are mutable but the payload is always manipulated
-        # by reference.  This scheme allows mutations of an array to
-        # be seen by its iterators.
-        members = [
-            ('size', types.intp),
-            ('allocated', types.intp),
-            # This member is only used only for reflected lists
-            ('dirty', types.boolean),
-            # Actually an inlined var-sized array
-            ('data', fe_type.container.dtype),
-        ]
-        super(ListPayloadModel, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.List)
-class ListModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        payload_type = types.ListPayload(fe_type)
-        members = [
-            # The meminfo data points to a ListPayload
-            ('meminfo', types.MemInfoPointer(payload_type)),
-            # This member is only used only for reflected lists
-            ('parent', types.pyobject),
-        ]
-        super(ListModel, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.ListIter)
-class ListIterModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        payload_type = types.ListPayload(fe_type.container)
-        members = [
-            # The meminfo data points to a ListPayload (shared with the
-            # original list object)
-            ('meminfo', types.MemInfoPointer(payload_type)),
-            ('index', types.EphemeralPointer(types.intp)),
-            ]
-        super(ListIterModel, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.SetEntry)
-class SetEntryModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        dtype = fe_type.set_type.dtype
-        members = [
-            # -1 = empty, -2 = deleted
-            ('hash', types.intp),
-            ('key', dtype),
-        ]
-        super(SetEntryModel, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.SetPayload)
-class SetPayloadModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        entry_type = types.SetEntry(fe_type.container)
-        members = [
-            # Number of active + deleted entries
-            ('fill', types.intp),
-            # Number of active entries
-            ('used', types.intp),
-            # Allocated size - 1 (size being a power of 2)
-            ('mask', types.intp),
-            # Search finger
-            ('finger', types.intp),
-            # This member is only used only for reflected sets
-            ('dirty', types.boolean),
-            # Actually an inlined var-sized array
-            ('entries', entry_type),
-        ]
-        super(SetPayloadModel, self).__init__(dmm, fe_type, members)
-
-@register_default(types.Set)
-class SetModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        payload_type = types.SetPayload(fe_type)
-        members = [
-            # The meminfo data points to a SetPayload
-            ('meminfo', types.MemInfoPointer(payload_type)),
-            # This member is only used only for reflected sets
-            ('parent', types.pyobject),
-        ]
-        super(SetModel, self).__init__(dmm, fe_type, members)
-
-@register_default(types.SetIter)
-class SetIterModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        payload_type = types.SetPayload(fe_type.container)
-        members = [
-            # The meminfo data points to a SetPayload (shared with the
-            # original set object)
-            ('meminfo', types.MemInfoPointer(payload_type)),
-            # The index into the entries table
-            ('index', types.EphemeralPointer(types.intp)),
-            ]
-        super(SetIterModel, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.Array)
-@register_default(types.Buffer)
-@register_default(types.ByteArray)
-@register_default(types.Bytes)
-@register_default(types.MemoryView)
-@register_default(types.PyArray)
-class ArrayModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        ndim = fe_type.ndim
-        members = [
-            ('meminfo', types.MemInfoPointer(fe_type.dtype)),
-            ('parent', types.pyobject),
-            ('nitems', types.intp),
-            ('itemsize', types.intp),
-            ('data', types.CPointer(fe_type.dtype)),
-            ('shape', types.UniTuple(types.intp, ndim)),
-            ('strides', types.UniTuple(types.intp, ndim)),
-
-        ]
-        super(ArrayModel, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.ArrayFlags)
-class ArrayFlagsModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        members = [
-            ('parent', fe_type.array_type),
-        ]
-        super(ArrayFlagsModel, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.NestedArray)
-class NestedArrayModel(ArrayModel):
-    def __init__(self, dmm, fe_type):
-        self._be_type = dmm.lookup(fe_type.dtype).get_data_type()
-        super(NestedArrayModel, self).__init__(dmm, fe_type)
-
-    def as_storage_type(self):
-        """Return the LLVM type representation for the storage of
-        the nestedarray.
-        """
-        ret = ir.ArrayType(self._be_type, self._fe_type.nitems)
-        return ret
-
-
-@register_default(types.Optional)
-class OptionalModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        members = [
-            ('data', fe_type.type),
-            ('valid', types.boolean),
-        ]
-        self._value_model = dmm.lookup(fe_type.type)
-        super(OptionalModel, self).__init__(dmm, fe_type, members)
-
-    def get_return_type(self):
-        return self._value_model.get_return_type()
-
-    def as_return(self, builder, value):
-        raise NotImplementedError
-
-    def from_return(self, builder, value):
-        return self._value_model.from_return(builder, value)
-
-    def traverse(self, builder):
-        def get_data(value):
-            valid = get_valid(value)
-            data = self.get(builder, value, "data")
-            return builder.select(valid, data, ir.Constant(data.type, None))
-        def get_valid(value):
-            return self.get(builder, value, "valid")
-
-        return [(self.get_type("data"), get_data),
-                (self.get_type("valid"), get_valid)]
-
-
-@register_default(types.Record)
-class RecordModel(CompositeModel):
-    def __init__(self, dmm, fe_type):
-        super(RecordModel, self).__init__(dmm, fe_type)
-        self._models = [self._dmm.lookup(t) for _, t in fe_type.members]
-        self._be_type = ir.ArrayType(ir.IntType(8), fe_type.size)
-        self._be_ptr_type = self._be_type.as_pointer()
-
-    def get_value_type(self):
-        """Passed around as reference to underlying data
-        """
-        return self._be_ptr_type
-
-    def get_argument_type(self):
-        return self._be_ptr_type
-
-    def get_return_type(self):
-        return self._be_ptr_type
-
-    def get_data_type(self):
-        return self._be_type
-
-    def as_data(self, builder, value):
-        return builder.load(value)
-
-    def from_data(self, builder, value):
-        raise NotImplementedError("use load_from_data_pointer() instead")
-
-    def as_argument(self, builder, value):
-        return value
-
-    def from_argument(self, builder, value):
-        return value
-
-    def as_return(self, builder, value):
-        return value
-
-    def from_return(self, builder, value):
-        return value
-
-    def load_from_data_pointer(self, builder, ptr, align=None):
-        return builder.bitcast(ptr, self.get_value_type())
-
-
-@register_default(types.UnicodeCharSeq)
-class UnicodeCharSeq(DataModel):
-    def __init__(self, dmm, fe_type):
-        super(UnicodeCharSeq, self).__init__(dmm, fe_type)
-        charty = ir.IntType(numpy_support.sizeof_unicode_char * 8)
-        self._be_type = ir.ArrayType(charty, fe_type.count)
-
-    def get_value_type(self):
-        return self._be_type
-
-    def get_data_type(self):
-        return self._be_type
-
-    def as_data(self, builder, value):
-        return value
-
-    def from_data(self, builder, value):
-        return value
-
-    def as_return(self, builder, value):
-        return value
-
-    def from_return(self, builder, value):
-        return value
-
-    def as_argument(self, builder, value):
-        return value
-
-    def from_argument(self, builder, value):
-        return value
-
-
-@register_default(types.CharSeq)
-class CharSeq(DataModel):
-    def __init__(self, dmm, fe_type):
-        super(CharSeq, self).__init__(dmm, fe_type)
-        charty = ir.IntType(8)
-        self._be_type = ir.ArrayType(charty, fe_type.count)
-
-    def get_value_type(self):
-        return self._be_type
-
-    def get_data_type(self):
-        return self._be_type
-
-    def as_data(self, builder, value):
-        return value
-
-    def from_data(self, builder, value):
-        return value
-
-    def as_return(self, builder, value):
-        return value
-
-    def from_return(self, builder, value):
-        return value
-
-    def as_argument(self, builder, value):
-        return value
-
-    def from_argument(self, builder, value):
-        return value
-
-
-class CContiguousFlatIter(StructModel):
-    def __init__(self, dmm, fe_type, need_indices):
-        assert fe_type.array_type.layout == 'C'
-        array_type = fe_type.array_type
-        dtype = array_type.dtype
-        ndim = array_type.ndim
-        members = [('array', array_type),
-                   ('stride', types.intp),
-                   ('index', types.EphemeralPointer(types.intp)),
-                   ]
-        if need_indices:
-            # For ndenumerate()
-            members.append(('indices', types.EphemeralArray(types.intp, ndim)))
-        super(CContiguousFlatIter, self).__init__(dmm, fe_type, members)
-
-
-class FlatIter(StructModel):
-    def __init__(self, dmm, fe_type):
-        array_type = fe_type.array_type
-        dtype = array_type.dtype
-        ndim = array_type.ndim
-        members = [('array', array_type),
-                   ('pointers', types.EphemeralArray(types.CPointer(dtype), ndim)),
-                   ('indices', types.EphemeralArray(types.intp, ndim)),
-                   ('exhausted', types.EphemeralPointer(types.boolean)),
-        ]
-        super(FlatIter, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.UniTupleIter)
-class UniTupleIter(StructModel):
-    def __init__(self, dmm, fe_type):
-        members = [('index', types.EphemeralPointer(types.intp)),
-                   ('tuple', fe_type.container,)]
-        super(UniTupleIter, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.misc.SliceLiteral)
-@register_default(types.SliceType)
-class SliceModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        members = [('start', types.intp),
-                   ('stop', types.intp),
-                   ('step', types.intp),
-                   ]
-        super(SliceModel, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.NPDatetime)
-@register_default(types.NPTimedelta)
-class NPDatetimeModel(PrimitiveModel):
-    def __init__(self, dmm, fe_type):
-        be_type = ir.IntType(64)
-        super(NPDatetimeModel, self).__init__(dmm, fe_type, be_type)
-
-
-@register_default(types.ArrayIterator)
-class ArrayIterator(StructModel):
-    def __init__(self, dmm, fe_type):
-        # We use an unsigned index to avoid the cost of negative index tests.
-        members = [('index', types.EphemeralPointer(types.uintp)),
-                   ('array', fe_type.array_type)]
-        super(ArrayIterator, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.EnumerateType)
-class EnumerateType(StructModel):
-    def __init__(self, dmm, fe_type):
-        members = [('count', types.EphemeralPointer(types.intp)),
-                   ('iter', fe_type.source_type)]
-
-        super(EnumerateType, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.ZipType)
-class ZipType(StructModel):
-    def __init__(self, dmm, fe_type):
-        members = [('iter%d' % i, source_type.iterator_type)
-                   for i, source_type in enumerate(fe_type.source_types)]
-        super(ZipType, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.RangeIteratorType)
-class RangeIteratorType(StructModel):
-    def __init__(self, dmm, fe_type):
-        int_type = fe_type.yield_type
-        members = [('iter', types.EphemeralPointer(int_type)),
-                   ('stop', int_type),
-                   ('step', int_type),
-                   ('count', types.EphemeralPointer(int_type))]
-        super(RangeIteratorType, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.Generator)
-class GeneratorModel(CompositeModel):
-    def __init__(self, dmm, fe_type):
-        super(GeneratorModel, self).__init__(dmm, fe_type)
-        # XXX Fold this in DataPacker?
-        self._arg_models = [self._dmm.lookup(t) for t in fe_type.arg_types
-                            if not isinstance(t, types.Omitted)]
-        self._state_models = [self._dmm.lookup(t) for t in fe_type.state_types]
-
-        self._args_be_type = ir.LiteralStructType(
-            [t.get_data_type() for t in self._arg_models])
-        self._state_be_type = ir.LiteralStructType(
-            [t.get_data_type() for t in self._state_models])
-        # The whole generator closure
-        self._be_type = ir.LiteralStructType(
-            [self._dmm.lookup(types.int32).get_value_type(),
-             self._args_be_type, self._state_be_type])
-        self._be_ptr_type = self._be_type.as_pointer()
-
-    def get_value_type(self):
-        """
-        The generator closure is passed around as a reference.
-        """
-        return self._be_ptr_type
-
-    def get_argument_type(self):
-        return self._be_ptr_type
-
-    def get_return_type(self):
-        return self._be_type
-
-    def get_data_type(self):
-        return self._be_type
-
-    def as_argument(self, builder, value):
-        return value
-
-    def from_argument(self, builder, value):
-        return value
-
-    def as_return(self, builder, value):
-        return self.as_data(builder, value)
-
-    def from_return(self, builder, value):
-        return self.from_data(builder, value)
-
-    def as_data(self, builder, value):
-        return builder.load(value)
-
-    def from_data(self, builder, value):
-        stack = cgutils.alloca_once(builder, value.type)
-        builder.store(value, stack)
-        return stack
-
-
-@register_default(types.ArrayCTypes)
-class ArrayCTypesModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        # ndim = fe_type.ndim
-        members = [('data', types.CPointer(fe_type.dtype)),
-                   ('meminfo', types.MemInfoPointer(fe_type.dtype))]
-        super(ArrayCTypesModel, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.RangeType)
-class RangeModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        int_type = fe_type.iterator_type.yield_type
-        members = [('start', int_type),
-                   ('stop', int_type),
-                   ('step', int_type)]
-        super(RangeModel, self).__init__(dmm, fe_type, members)
-
-
-# =============================================================================
-
-@register_default(types.NumpyNdIndexType)
-class NdIndexModel(StructModel):
-    def __init__(self, dmm, fe_type):
-        ndim = fe_type.ndim
-        members = [('shape', types.UniTuple(types.intp, ndim)),
-                   ('indices', types.EphemeralArray(types.intp, ndim)),
-                   ('exhausted', types.EphemeralPointer(types.boolean)),
-                   ]
-        super(NdIndexModel, self).__init__(dmm, fe_type, members)
-
-
-@register_default(types.NumpyFlatType)
-def handle_numpy_flat_type(dmm, ty):
-    if ty.array_type.layout == 'C':
-        return CContiguousFlatIter(dmm, ty, need_indices=False)
-    else:
-        return FlatIter(dmm, ty)
-
-@register_default(types.NumpyNdEnumerateType)
-def handle_numpy_ndenumerate_type(dmm, ty):
-    if ty.array_type.layout == 'C':
-        return CContiguousFlatIter(dmm, ty, need_indices=True)
-    else:
-        return FlatIter(dmm, ty)
-
-@register_default(types.BoundFunction)
-def handle_bound_function(dmm, ty):
-    # The same as the underlying type
-    return dmm[ty.this]
-
-
-@register_default(types.NumpyNdIterType)
-class NdIter(StructModel):
-    def __init__(self, dmm, fe_type):
-        array_types = fe_type.arrays
-        ndim = fe_type.ndim
-        shape_len = ndim if fe_type.need_shaped_indexing else 1
-        members = [('exhausted', types.EphemeralPointer(types.boolean)),
-                   ('arrays', types.Tuple(array_types)),
-                   # The iterator's main shape and indices
-                   ('shape', types.UniTuple(types.intp, shape_len)),
-                   ('indices', types.EphemeralArray(types.intp, shape_len)),
-                   ]
-        # Indexing state for the various sub-iterators
-        # XXX use a tuple instead?
-        for i, sub in enumerate(fe_type.indexers):
-            kind, start_dim, end_dim, _ = sub
-            member_name = 'index%d' % i
-            if kind == 'flat':
-                # A single index into the flattened array
-                members.append((member_name, types.EphemeralPointer(types.intp)))
-            elif kind in ('scalar', 'indexed', '0d'):
-                # Nothing required
-                pass
+        def generate():
+            # Special case for urllib3.
+            if hasattr(self.raw, "stream"):
+                try:
+                    yield from self.raw.stream(chunk_size, decode_content=True)
+                except ProtocolError as e:
+                    raise ChunkedEncodingError(e)
+                except DecodeError as e:
+                    raise ContentDecodingError(e)
+                except ReadTimeoutError as e:
+                    raise ConnectionError(e)
+                except SSLError as e:
+                    raise RequestsSSLError(e)
             else:
-                assert 0
-        # Slots holding values of the scalar args
-        # XXX use a tuple instead?
-        for i, ty in enumerate(fe_type.arrays):
-            if not isinstance(ty, types.Array):
-                member_name = 'scalar%d' % i
-                members.append((member_name, types.EphemeralPointer(ty)))
+                # Standard file-like object.
+                while True:
+                    chunk = self.raw.read(chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
 
-        super(NdIter, self).__init__(dmm, fe_type, members)
+            self._content_consumed = True
 
+        if self._content_consumed and isinstance(self._content, bool):
+            raise StreamConsumedError()
+        elif chunk_size is not None and not isinstance(chunk_size, int):
+            raise TypeError(
+                f"chunk_size must be an int, it is instead a {type(chunk_size)}."
+            )
+        # simulate reading small chunks of the content
+        reused_chunks = iter_slices(self._content, chunk_size)
 
-@register_default(types.DeferredType)
-class DeferredStructModel(CompositeModel):
-    def __init__(self, dmm, fe_type):
-        super(DeferredStructModel, self).__init__(dmm, fe_type)
-        self.typename = "deferred.{0}".format(id(fe_type))
-        self.actual_fe_type = fe_type.get()
+        stream_chunks = generate()
 
-    def get_value_type(self):
-        return ir.global_context.get_identified_type(self.typename + '.value')
+        chunks = reused_chunks if self._content_consumed else stream_chunks
 
-    def get_data_type(self):
-        return ir.global_context.get_identified_type(self.typename + '.data')
+        if decode_unicode:
+            chunks = stream_decode_response_unicode(chunks, self)
 
-    def get_argument_type(self):
-        return self._actual_model.get_argument_type()
+        return chunks
 
-    def as_argument(self, builder, value):
-        inner = self.get(builder, value)
-        return self._actual_model.as_argument(builder, inner)
+    def iter_lines(
+        self, chunk_size=ITER_CHUNK_SIZE, decode_unicode=False, delimiter=None
+    ):
+        """Iterates over the response data, one line at a time.  When
+        stream=True is set on the request, this avoids reading the
+        content at once into memory for large responses.
 
-    def from_argument(self, builder, value):
-        res = self._actual_model.from_argument(builder, value)
-        return self.set(builder, self.make_uninitialized(), res)
+        .. note:: This method is not reentrant safe.
+        """
 
-    def from_data(self, builder, value):
-        self._define()
-        elem = self.get(builder, value)
-        value = self._actual_model.from_data(builder, elem)
-        out = self.make_uninitialized()
-        return self.set(builder, out, value)
+        pending = None
 
-    def as_data(self, builder, value):
-        self._define()
-        elem = self.get(builder, value)
-        value = self._actual_model.as_data(builder, elem)
-        out = self.make_uninitialized(kind='data')
-        return self.set(builder, out, value)
+        for chunk in self.iter_content(
+            chunk_size=chunk_size, decode_unicode=decode_unicode
+        ):
+            if pending is not None:
+                chunk = pending + chunk
 
-    def from_return(self, builder, value):
-        return value
+            if delimiter:
+                lines = chunk.split(delimiter)
+            else:
+                lines = chunk.splitlines()
 
-    def as_return(self, builder, value):
-        return value
+            if lines and lines[-1] and chunk and lines[-1][-1] == chunk[-1]:
+                pending = lines.pop()
+            else:
+                pending = None
 
-    def get(self, builder, value):
-        return builder.extract_value(value, [0])
+            yield from lines
 
-    def set(self, builder, value, content):
-        return builder.insert_value(value, content, [0])
-
-    def make_uninitialized(self, kind='value'):
-        self._define()
-        if kind == 'value':
-            ty = self.get_value_type()
-        else:
-            ty = self.get_data_type()
-        return ir.Constant(ty, ir.Undefined)
-
-    def _define(self):
-        valty = self.get_value_type()
-        self._define_value_type(valty)
-        datty = self.get_data_type()
-        self._define_data_type(datty)
-
-    def _define_value_type(self, value_type):
-        if value_type.is_opaque:
-            value_type.set_body(self._actual_model.get_value_type())
-
-    def _define_data_type(self, data_type):
-        if data_type.is_opaque:
-            data_type.set_body(self._actual_model.get_data_type())
+        if pending is not None:
+            yield pending
 
     @property
-    def _actual_model(self):
-        return self._dmm.lookup(self.actual_fe_type)
+    def content(self):
+        """Content of the response, in bytes."""
 
-    def traverse(self, builder):
-        return [(self.actual_fe_type,
-                 lambda value: builder.extract_value(value, [0]))]
+        if self._content is False:
+            # Read the contents.
+            if self._content_consumed:
+                raise RuntimeError("The content for this response was already consumed")
 
+            if self.status_code == 0 or self.raw is None:
+                self._content = None
+            else:
+                self._content = b"".join(self.iter_content(CONTENT_CHUNK_SIZE)) or b""
 
-@register_default(types.StructRefPayload)
-class StructPayloadModel(StructModel):
-    """Model for the payload of a mutable struct
-    """
-    def __init__(self, dmm, fe_typ):
-        members = tuple(fe_typ.field_dict.items())
-        super().__init__(dmm, fe_typ, members)
+        self._content_consumed = True
+        # don't need to release the connection; that's been handled by urllib3
+        # since we exhausted the data.
+        return self._content
 
+    @property
+    def text(self):
+        """Content of the response, in unicode.
 
-class StructRefModel(StructModel):
-    """Model for a mutable struct.
-    A reference to the payload
-    """
-    def __init__(self, dmm, fe_typ):
-        dtype = fe_typ.get_data_type()
-        members = [
-            ("meminfo", types.MemInfoPointer(dtype)),
-        ]
-        super().__init__(dmm, fe_typ, members)
+        If Response.encoding is None, encoding will be guessed using
+        ``charset_normalizer`` or ``chardet``.
 
+        The encoding of the response content is determined based solely on HTTP
+        headers, following RFC 2616 to the letter. If you can take advantage of
+        non-HTTP knowledge to make a better guess at the encoding, you should
+        set ``r.encoding`` appropriately before accessing this property.
+        """
+
+        # Try charset from content-type
+        content = None
+        encoding = self.encoding
+
+        if not self.content:
+            return ""
+
+        # Fallback to auto-detected encoding.
+        if self.encoding is None:
+            encoding = self.apparent_encoding
+
+        # Decode unicode from given encoding.
+        try:
+            content = str(self.content, encoding, errors="replace")
+        except (LookupError, TypeError):
+            # A LookupError is raised if the encoding was not found which could
+            # indicate a misspelling or similar mistake.
+            #
+            # A TypeError can be raised if encoding is None
+            #
+            # So we try blindly encoding.
+            content = str(self.content, errors="replace")
+
+        return content
+
+    def json(self, **kwargs):
+        r"""Decodes the JSON response body (if any) as a Python object.
+
+        This may return a dictionary, list, etc. depending on what is in the response.
+
+        :param \*\*kwargs: Optional arguments that ``json.loads`` takes.
+        :raises requests.exceptions.JSONDecodeError: If the response body does not
+            contain valid json.
+        """
+
+        if not self.encoding and self.content and len(self.content) > 3:
+            # No encoding set. JSON RFC 4627 section 3 states we should expect
+            # UTF-8, -16 or -32. Detect which one to use; If the detection or
+            # decoding fails, fall back to `self.text` (using charset_normalizer to make
+            # a best guess).
+            encoding = guess_json_utf(self.content)
+            if encoding is not None:
+                try:
+                    return complexjson.loads(self.content.decode(encoding), **kwargs)
+                except UnicodeDecodeError:
+                    # Wrong UTF codec detected; usually because it's not UTF-8
+                    # but some other 8-bit codec.  This is an RFC violation,
+                    # and the server didn't bother to tell us what codec *was*
+                    # used.
+                    pass
+                except JSONDecodeError as e:
+                    raise RequestsJSONDecodeError(e.msg, e.doc, e.pos)
+
+        try:
+            return complexjson.loads(self.text, **kwargs)
+        except JSONDecodeError as e:
+            # Catch JSON-related errors and raise as requests.JSONDecodeError
+            # This aliases json.JSONDecodeError and simplejson.JSONDecodeError
+            raise RequestsJSONDecodeError(e.msg, e.doc, e.pos)
+
+    @property
+    def links(self):
+        """Returns the parsed header links of the response, if any."""
+
+        header = self.headers.get("link")
+
+        resolved_links = {}
+
+        if header:
+            links = parse_header_links(header)
+
+            for link in links:
+                key = link.get("rel") or link.get("url")
+                resolved_links[key] = link
+
+        return resolved_links
+
+    def raise_for_status(self):
+        """Raises :class:`HTTPError`, if one occurred."""
+
+        http_error_msg = ""
+        if isinstance(self.reason, bytes):
+            # We attempt to decode utf-8 first because some servers
+            # choose to localize their reason strings. If the string
+            # isn't utf-8, we fall back to iso-8859-1 for all other
+            # encodings. (See PR #3538)
+            try:
+                reason = self.reason.decode("utf-8")
+            except UnicodeDecodeError:
+                reason = self.reason.decode("iso-8859-1")
+        else:
+            reason = self.reason
+
+        if 400 <= self.status_code < 500:
+            http_error_msg = (
+                f"{self.status_code} Client Error: {reason} for url: {self.url}"
+            )
+
+        elif 500 <= self.status_code < 600:
+            http_error_msg = (
+                f"{self.status_code} Server Error: {reason} for url: {self.url}"
+            )
+
+        if http_error_msg:
+            raise HTTPError(http_error_msg, response=self)
+
+    def close(self):
+        """Releases the connection back to the pool. Once this method has been
+        called the underlying ``raw`` object must not be accessed again.
+
+        *Note: Should not normally need to be called explicitly.*
+        """
+        if not self._content_consumed:
+            self.raw.close()
+
+        release_conn = getattr(self.raw, "release_conn", None)
+        if release_conn is not None:
+            release_conn()

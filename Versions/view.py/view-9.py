@@ -1,66 +1,50 @@
-from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QPushButton, QTextEdit, QSlider, QLabel
+from PySide6.QtWidgets import *
 from PySide6.QtCore import Qt, Signal
-from ui.components import SpectralWidget
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
-class AudioExpertView(QMainWindow):
-    scan_requested = Signal(str)
-    feedback_given = Signal(str, str)
-
-    def __init__(self, config):
+class MainView(QMainWindow):
+    def __init__(self):
         super().__init__()
-        self.setWindowTitle("AUDIO EXPERT PRO V0.2.4")
-        self.resize(1100, 800)
-        self.setAcceptDrops(True)
-        self.current_hash = None
-        self._setup_ui()
-
-    def _setup_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-
-        self.status_label = QLabel("DÉPOSEZ UN FICHIER")
-        self.status_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.status_label)
-
+        self.setWindowTitle("Audio Expert Pro V4")
+        self.resize(1300, 900)
         self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
         
-        # Inspection
-        self.tab_spec = QWidget()
-        spec_l = QVBoxLayout(self.tab_spec)
-        self.spec_view = SpectralWidget()
-        self.zoom = QSlider(Qt.Horizontal)
-        self.zoom.setRange(5, 100); self.zoom.setValue(100)
-        self.zoom.valueChanged.connect(self.spec_view.set_zoom)
-        spec_l.addWidget(self.spec_view)
-        spec_l.addWidget(self.zoom)
-        self.tabs.addTab(self.tab_spec, "SPECTROGRAMME")
+        self.setup_analyse_tab()
+        self.setup_results_tab()
+        self.setup_review_tab()
 
-        # Rapport
-        self.report = QTextEdit("Diagnostic...")
-        self.tabs.addTab(self.report, "RAPPORT IA")
-        layout.addWidget(self.tabs)
+    def setup_analyse_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        self.btn_browse = QPushButton("📁 Sélectionner Dossier")
+        self.progress = QProgressBar()
+        self.log = QTextEdit(); self.log.setReadOnly(True)
+        layout.addWidget(self.btn_browse); layout.addWidget(self.progress); layout.addWidget(self.log)
+        self.tabs.addTab(tab, "📊 Analyse")
 
-        # Verdicts
-        v_layout = QHBoxLayout()
-        self.btn_bon = QPushButton("BON ✅")
-        self.btn_ban = QPushButton("DÉFECTUEUX ❌")
-        self.btn_bon.clicked.connect(lambda: self._verdict("bon"))
-        self.btn_ban.clicked.connect(lambda: self._verdict("ban"))
-        v_layout.addWidget(self.btn_bon); v_layout.addWidget(self.btn_ban)
-        layout.addLayout(v_layout)
+    def setup_results_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["Fichier", "Score Qualité", "ML Suspicion", "Type HQ", "Tag"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.table)
+        self.tabs.addTab(tab, "📋 Résultats")
 
-    def handle_dsp_ready(self, res):
-        self.current_hash = res['hash']
-        self.status_label.setText(f"QUALITÉ : {res.get('quality_score', 0):.1f}%")
-        if 'matrix' in res: self.spec_view.update_data(res['matrix'])
-
-    def handle_analysis_result(self, res):
-        self.report.setText(f"Score Suspicion: {res['score']:.2f}\n\n{res.get('analysis_text', '')}")
-
-    def _verdict(self, tag):
-        if self.current_hash: self.feedback_given.emit(self.current_hash, tag)
-
-    def dragEnterEvent(self, e): e.accept() if e.mimeData().hasUrls() else e.ignore()
-    def dropEvent(self, e):
-        for url in e.mimeData().urls(): self.scan_requested.emit(url.toLocalFile())
+    def setup_review_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        self.lbl_current = QLabel("Sélectionnez un fichier pour révision")
+        self.fig, self.ax = plt.subplots(figsize=(8, 3))
+        self.canvas = FigureCanvas(self.fig)
+        
+        btn_layout = QHBoxLayout()
+        self.btn_good = QPushButton("✅ BON"); self.btn_bad = QPushButton("❌ DÉFECTUEUX")
+        btn_layout.addWidget(self.btn_good); btn_layout.addWidget(self.btn_bad)
+        
+        layout.addWidget(self.lbl_current)
+        layout.addWidget(self.canvas)
+        layout.addLayout(btn_layout)
+        self.tabs.addTab(tab, "🎧 Révision")

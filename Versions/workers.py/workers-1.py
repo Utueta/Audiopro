@@ -1,47 +1,60 @@
-from PySide6.QtCore import QRunnable, QObject, Signal, Slot
 import traceback
+import logging
+from PySide6.QtCore import QRunnable, QObject, Signal, Slot
 
 class WorkerSignals(QObject):
     """
-    Définit les signaux disponibles pour le thread d'analyse.
-    - result: Transmet le dictionnaire complet (DSP + ML)
-    - error: Transmet un tuple (Exception, Message String)
-    - progress: Transmet un entier pour la barre de progression
+    Signaux de communication pour le Worker.
+    Définit l'interface entre le thread de calcul et l'UI Obsidian.
     """
+    # Émis quand l'analyse est réussie (retourne le dictionnaire de résultats)
     result = Signal(dict)
+    
+    # Émis en cas d'erreur (retourne le message d'erreur)
     error = Signal(str)
-    progress = Signal(int)
+    
+    # Émis au début et à la fin (utile pour des indicateurs spécifiques)
+    finished = Signal()
 
 class AnalysisWorker(QRunnable):
     """
-    Worker chargé d'exécuter le pipeline d'analyse pour UN fichier.
-    Hérite de QRunnable pour être géré par le QThreadPool d'app.py.
+    Worker haute performance pour l'analyse individuelle de fichiers.
+    Encapsulé pour être exécuté dans un QThreadPool.
     """
     def __init__(self, manager, file_path):
         super().__init__()
         self.manager = manager
         self.file_path = file_path
         self.signals = WorkerSignals()
+        self.logger = logging.getLogger("Audiopro.Worker")
+        
+        # DevSecOps : Le thread se supprime de la mémoire une fois fini
+        self.setAutoDelete(True)
 
     @Slot()
     def run(self):
         """
-        Point d'entrée du thread. Exécute le pipeline du CentralManager.
+        Point d'entrée du thread. Exécute le pipeline de certification.
         """
         try:
-            # Appel du pipeline consolidé (Pre-scan -> DSP -> ML)
-            # Cette méthode dans manager.py intègre déjà la sécurité RAM
-            analysis_data = self.manager.process_file(self.file_path)
+            self.logger.info(f"Début de l'analyse : {self.file_path}")
             
-            # Injection du chemin pour que la vue sache quel fichier mettre à jour
-            if isinstance(analysis_data, dict):
-                analysis_data['path'] = self.file_path
-                
-                # Émission du résultat vers le thread principal (UI)
-                self.signals.result.emit(analysis_data)
+            # Appel au Manager (Pipeline : Metadata -> DSP -> Brain -> LLM)
+            result = self.manager.process_file(self.file_path)
             
+            # Ajout du chemin pour que l'UI sache quel fichier est traité
+            if isinstance(result, dict):
+                result['path'] = self.file_path
+                self.signals.result.emit(result)
+            else:
+                raise ValueError("Le format de retour du Manager est invalide.")
+
         except Exception as e:
-            # Capture complète de l'erreur pour le debug senior
+            # Capture détaillée de l'erreur pour l'audit
             error_msg = f"Erreur sur {self.file_path}: {str(e)}"
+            self.logger.error(error_msg)
+            self.logger.error(traceback.format_exc())
             self.signals.error.emit(error_msg)
-            print(traceback.format_exc())
+            
+        finally:
+            self.signals.finished.emit()

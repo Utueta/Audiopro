@@ -1,123 +1,68 @@
-"""
-Orchestrator coordinating all subsystems.
-Uses dependency injection for testability.
-"""
-import logging
-import uuid
-from pathlib import Path
-from datetime import datetime
-from typing import Optional
+import weakref
+from collections import ChainMap
 
-from .analyzer.pipeline import AudioAnalysisPipeline
-from .brain.model_interface import AudioQualityModel
-from services.llm_interface import LLMProvider
-from persistence.repository import AnalysisRepository
-from .models import AnalysisResult, LLMArbitration
+from numba.core import types
 
 
-logger = logging.getLogger(__name__)
-
-
-class AnalysisManager:
+class DataModelManager(object):
+    """Manages mapping of FE types to their corresponding data model
     """
-    Core orchestrator - coordinates DSP, ML, LLM, and persistence.
-    All dependencies injected for testability.
-    """
-    
-    def __init__(
-        self,
-        dsp_pipeline: AudioAnalysisPipeline,
-        ml_model: AudioQualityModel,
-        llm_provider: LLMProvider,
-        repository: AnalysisRepository,
-        llm_confidence_threshold: float = 0.85
-    ):
-        self.dsp_pipeline = dsp_pipeline
-        self.ml_model = ml_model
-        self.llm_provider = llm_provider
-        self.repository = repository
-        self.llm_threshold = llm_confidence_threshold
-        
-        logger.info("AnalysisManager initialized")
-    
-    def analyze_file(self, filepath: Path) -> AnalysisResult:
+
+    def __init__(self, handlers=None):
         """
-        Complete analysis pipeline for single file.
-        
-        Returns:
-            Complete analysis result with final quality verdict
+        Parameters
+        -----------
+        handlers: Mapping[Type, DataModel] or None
+            Optionally provide the initial handlers mapping.
         """
-        logger.info(f"Starting analysis: {filepath.name}")
-        
-        # Phase 1: DSP Analysis
-        metadata, dsp, spectral = self.dsp_pipeline.analyze(filepath)
-        
-        # Phase 2: ML Classification
-        ml_classification = self.ml_model.predict(dsp, spectral)
-        logger.info(f"ML: {ml_classification.predicted_class} ({ml_classification.confidence:.2%})")
-        
-        # Phase 3: Conditional LLM Arbitration
-        llm_result = None
-        if ml_classification.confidence < self.llm_threshold:
-            logger.info("Low ML confidence - requesting LLM arbitration")
-            
-            # Build partial result for LLM
-            partial_result = AnalysisResult(
-                analysis_id=str(uuid.uuid4()),
-                filepath=filepath,
-                timestamp=datetime.now(),
-                metadata=metadata,
-                dsp=dsp,
-                spectral=spectral,
-                ml_classification=ml_classification,
-                llm_arbitration=None,
-                final_quality=ml_classification.predicted_class,
-                user_feedback=None
-            )
-            
-            llm_result = self.llm_provider.arbitrate(partial_result)
-        
-        # Phase 4: Final Verdict
-        final_quality = self._determine_final_quality(ml_classification, llm_result)
-        
-        # Build complete result
-        result = AnalysisResult(
-            analysis_id=str(uuid.uuid4()),
-            filepath=filepath,
-            timestamp=datetime.now(),
-            metadata=metadata,
-            dsp=dsp,
-            spectral=spectral,
-            ml_classification=ml_classification,
-            llm_arbitration=llm_result,
-            final_quality=final_quality,
-            user_feedback=None
-        )
-        
-        # Phase 5: Persist
-        self.repository.save(result)
-        
-        logger.info(f"Analysis complete: {final_quality}")
-        return result
-    
-    def _determine_final_quality(
-        self, 
-        ml_classification, 
-        llm_arbitration: Optional[LLMArbitration]
-    ) -> str:
+        # { numba type class -> model factory }
+        self._handlers = handlers or {}
+        # { numba type instance -> model instance }
+        self._cache = weakref.WeakKeyDictionary()
+
+    def register(self, fetypecls, handler):
+        """Register the datamodel factory corresponding to a frontend-type class
         """
-        Determine final quality verdict from ML and LLM results.
-        Logic: LLM overrides ML when confidence is low.
+        assert issubclass(fetypecls, types.Type)
+        self._handlers[fetypecls] = handler
+
+    def lookup(self, fetype):
+        """Returns the corresponding datamodel given the frontend-type instance
         """
-        if llm_arbitration:
-            return llm_arbitration.recommendation
-        return ml_classification.predicted_class
-    
-    def get_analysis_history(self, filepath: Path) -> Optional[AnalysisResult]:
-        """Check if file was previously analyzed."""
-        return self.repository.get_by_filepath(filepath)
-    
-    def submit_feedback(self, analysis_id: str, feedback: str) -> None:
-        """Record user feedback for incremental learning."""
-        self.repository.update_feedback(analysis_id, feedback)
-        logger.info(f"Feedback recorded: {analysis_id}")
+        try:
+            return self._cache[fetype]
+        except KeyError:
+            pass
+        handler = self._handlers[type(fetype)]
+        model = self._cache[fetype] = handler(self, fetype)
+        return model
+
+    def __getitem__(self, fetype):
+        """Shorthand for lookup()
+        """
+        return self.lookup(fetype)
+
+    def copy(self):
+        """
+        Make a copy of the manager.
+        Use this to inherit from the default data model and specialize it
+        for custom target.
+        """
+        return DataModelManager(self._handlers.copy())
+
+    def chain(self, other_manager):
+        """Create a new DataModelManager by chaining the handlers mapping of
+        `other_manager` with a fresh handlers mapping.
+
+        Any existing and new handlers inserted to `other_manager` will be
+        visible to the new manager. Any handlers inserted to the new manager
+        can override existing handlers in `other_manager` without actually
+        mutating `other_manager`.
+
+        Parameters
+        ----------
+        other_manager: DataModelManager
+        """
+        chained = ChainMap(self._handlers, other_manager._handlers)
+        return DataModelManager(chained)
+

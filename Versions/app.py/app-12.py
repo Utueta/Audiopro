@@ -1,119 +1,76 @@
-import os
-import json
-import sys
 from PySide6.QtCore import QThreadPool, QRunnable, Signal, QObject
-from PySide6.QtWidgets import QApplication
+# ... autres imports ...
 
-from analyzer import AudioAnalyzer
-from model import AudioModel
-from llm_service import LLMService
-from view import AudioExpertView
-
-# --- Gestionnaire de signaux pour le ThreadPool ---
-class AnalysisSignals(QObject):
+class AnalysisWorkerSignals(QObject):
     result = Signal(dict)
     finished = Signal()
-    error = Signal(str)
 
-# --- Tâche d'analyse asynchrone ---
 class AnalysisWorker(QRunnable):
-    def __init__(self, file_path, analyzer, model, llm):
+    def __init__(self, path, analyzer):
         super().__init__()
-        self.file_path = file_path
+        self.path = path
         self.analyzer = analyzer
-        self.model = model
-        self.llm = llm
-        self.signals = AnalysisSignals()
+        self.signals = AnalysisWorkerSignals()
 
     def run(self):
-        try:
-            # 1. Analyse physique
-            metrics = self.analyzer.get_metrics(self.file_path)
-            if not metrics:
-                return
+        data = self.analyzer.get_metrics(self.path)
+        self.signals.result.emit(data)
+        self.signals.finished.emit()
 
-            # 2. Score ML
-            metrics['ml_score'] = self.model.predict_suspicion(metrics)
-
-            # 3. Arbitrage de Zone Grise (Spécification V0.1)
-            # Si le score est entre 0.4 et 0.7, on demande au LLM
-            zone = self.model.config['llm']['arbitration_zone']
-            if zone['min_score'] <= metrics['ml_score'] <= zone['max_score']:
-                verdict_llm = self.llm.get_verdict(metrics)
-                metrics['llm_decision'] = verdict_llm.get('decision', 'FLAG')
-                metrics['llm_reason'] = verdict_llm.get('reason', 'Besoin de révision humaine.')
-            else:
-                metrics['llm_decision'] = "AUTO"
-                metrics['llm_reason'] = "Score ML tranché."
-
-            self.signals.result.emit(metrics)
-        except Exception as e:
-            self.signals.error.emit(str(e))
-        finally:
-            self.signals.finished.emit()
-
-# --- Contrôleur Principal ---
-class AudioExpertApp:
+class AudioApp:
     def __init__(self):
-        self.load_config()
-        
-        # Initialisation des composants cœurs
-        self.analyzer = AudioAnalyzer(self.config)
-        self.model = AudioModel()
-        self.llm = LLMService(self.config)
-        
-        # Interface et Threading
-        self.view = AudioExpertView(self.config)
+        # ... init existante ...
         self.threadpool = QThreadPool()
-        # Utilise tous les cœurs sauf un pour garder le système réactif
-        self.threadpool.setMaxThreadCount(max(1, os.cpu_count() - 1))
+        print(f"🚀 Threads disponibles : {self.threadpool.maxThreadCount()}")
 
-        # Connexions Signaux -> Slots
-        self.view.scan_requested.connect(self.start_folder_scan)
-        self.view.label_submitted.connect(self.process_user_feedback)
-
-    def load_config(self):
-        with open("config.json", "r") as f:
-            self.config = json.load(f)
-
-    def start_folder_scan(self, folder_path):
-        """Parcours récursif et envoi au pool de threads."""
-        extensions = self.config['audio']['extensions']
+    def run_pipeline(self):
+        folder = QFileDialog.getExistingDirectory(None, "Dossier")
+        if not folder: return
+        files = self._get_filtered_files(folder, self.view.combo_options.currentIndex())
         
-        for root, _, files in os.walk(folder_path):
-            for file in files:
-                if any(file.lower().endswith(ext) for ext in extensions):
-                    full_path = os.path.join(root, file)
-                    worker = AnalysisWorker(full_path, self.analyzer, self.model, self.llm)
-                    worker.signals.result.connect(self.on_analysis_complete)
-                    self.threadpool.start(worker)
+        self.progress = QProgressDialog("Analyse Multithreadée...", "Stop", 0, len(files), self.view)
+        self.completed_count = 0
 
-    def on_analysis_complete(self, metrics):
-        """Traitement du résultat final et mise à jour UI."""
-        # Enregistre en base de données (SQLite)
-        self.model.add_to_history(metrics)
+        for path in files:
+            worker = AnalysisWorker(path, self.analyzer)
+            worker.signals.result.connect(self._on_analysis_result)
+            self.threadpool.start(worker)
+
+    def _on_analysis_result(self, data):
+        self.results.append(data)
+        self.model.add_to_queue(data)
+        self._update_main_table(data)
+        self.completed_count += 1
+        self.progress.setValue(self.completed_count)
+        if self.completed_count >= self.progress.maximum():
+            self.start_llm_pipeline()
+
+    def detect_duplicates(self):
+        """Nettoyage intelligent : garde le fichier avec le meilleur bitrate et score."""
+        self.view.table_dup.setRowCount(0)
+        hashes = {}
+        duplicates = []
+
+        for res in self.results:
+            h = res['hash']
+            if h == "0": continue
+            if h not in hashes:
+                hashes[h] = res
+            else:
+                # Comparaison intelligente
+                original = hashes[h]
+                current = res
+                # On garde celui qui a le plus haut bitrate ou le score le plus bas
+                if current['meta']['bitrate'] > original['meta']['bitrate']:
+                    duplicates.append(original)
+                    hashes[h] = current
+                else:
+                    duplicates.append(current)
         
-        # Met à jour l'interface graphique
-        self.view.add_result_to_table(metrics)
-        
-        # Gestion intelligente des doublons (Spécification V0.1)
-        # On pourrait ici marquer le fichier si un hash identique existe déjà
-
-    def process_user_feedback(self, file_hash, label):
-        """Gère le feedback utilisateur pour le réentraînement du modèle."""
-        # Récupère les métriques depuis la DB via le hash
-        # Met à jour le label (Ban/Good) et déclenche potentiellement le retrain()
-        with self.model as m:
-            m.mark_user_decision(file_hash, label)
-
-    def run(self):
-        self.view.show()
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    app.setApplicationName("Audio Expert Pro V0.1")
-    
-    expert_app = AudioExpertApp()
-    expert_app.run()
-    
-    sys.exit(app.exec())
+        # Affichage
+        for d in duplicates:
+            row = self.view.table_dup.rowCount()
+            self.view.table_dup.insertRow(row)
+            self.view.table_dup.setItem(row, 0, QTableWidgetItem(os.path.basename(d['path'])))
+            self.view.table_dup.setItem(row, 1, QTableWidgetItem("Qualité Inférieure"))
+            self.view.table_dup.setItem(row, 2, QTableWidgetItem(os.path.basename(hashes[d['hash']]['path'])))

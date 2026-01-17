@@ -4,12 +4,14 @@ from sklearn.preprocessing import StandardScaler
 
 def init():
     os.makedirs("models", exist_ok=True)
-    X = np.array([[18000, 0.0], [12000, 0.15], [20000, 0.0], [8000, 0.45]])
-    y = np.array([0.05, 0.88, 0.01, 0.96]) 
+    # Centroid Hz, Clipping Ratio
+    X = np.array([[18000, 0.0], [12000, 0.1], [20000, 0.0], [8000, 0.5]])
+    y = np.array([0.05, 0.85, 0.02, 0.98])
     scaler = StandardScaler().fit(X)
     model = RandomForestRegressor(n_estimators=10).fit(scaler.transform(X), y)
     joblib.dump(model, "models/audio_expert_rf.joblib")
     joblib.dump(scaler, "models/scaler.pkl")
-    print("✅ Pipeline ML Obsidian Initialisé.")
+    print("✅ Artefacts ML initialisés.")
 
 if __name__ == "__main__": init()
+

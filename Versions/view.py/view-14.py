@@ -1,181 +1,139 @@
 import os
 import sys
-import numpy as np
-import pynvml 
-import librosa
-import librosa.display
-
-# --- OPTIMISATION 1 : Backend QtAgg ---
-import matplotlib
-matplotlib.use('QtAgg') 
+from PySide6.QtWidgets import (QMainWindow, QTabWidget, QWidget, QVBoxLayout, 
+                             QHBoxLayout, QPushButton, QFileDialog, QTableWidget, 
+                             QTableWidgetItem, QProgressBar, QLabel)
+from PySide6.QtCore import Qt, Slot, Signal
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-
-from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QPushButton, QTableWidget, QTableWidgetItem, 
-                             QLabel, QProgressBar, QFileDialog, QHeaderView)
-from PySide6.QtCore import Qt, QTimer, Signal
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
 class AudioExpertView(QMainWindow):
-    scan_requested = Signal(str)
-    label_submitted = Signal(str, str) # Hash, Label
+    # Signaux pour communiquer avec le contrôleur (app.py)
+    request_scan = Signal(str)
+    request_action = Signal(str, str) # hash, action (GOOD/BAN)
 
-    def __init__(self, config):
+    def __init__(self):
         super().__init__()
-        self.config = config
-        self.setWindowTitle(f"Audio Expert Pro V{self.config['project']['version']}")
-        self.resize(1280, 850)
+        self.setWindowTitle("Audio Expert Pro V2.0 - Obsidian Dark")
+        self.resize(1200, 800)
+        self._apply_theme()
         
-        # État interne pour la visualisation
-        self.current_selected_path = None
+        # Central Widget & Tabs
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
         
-        # Initialisation NVML
-        try:
-            pynvml.nvmlInit()
-            self.gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            self.has_gpu = True
-        except:
-            self.has_gpu = False
-
-        self._init_ui()
+        # Initialisation des onglets
+        self.tab_scan = QWidget()
+        self.tab_results = QWidget()
+        self.tab_revision = QWidget()
+        self.tab_duplicates = QWidget()
         
-        # Timer de monitoring (UI Refresh Rate)
-        self.monitor_timer = QTimer()
-        self.monitor_timer.timeout.connect(self._update_gpu_stats)
-        self.monitor_timer.start(self.config['ui_settings']['refresh_rate_ms'])
-
-    def _init_ui(self):
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-
-        # TOP BAR
-        top_layout = QHBoxLayout()
-        self.btn_scan = QPushButton("📁 SCANNER DOSSIER")
-        self.btn_scan.setStyleSheet("font-weight: bold; padding: 10px;")
-        self.btn_scan.clicked.connect(self._on_scan_clicked)
+        self.tabs.addTab(self.tab_scan, "🚀 SCAN")
+        self.tabs.addTab(self.tab_results, "📊 RÉSULTATS")
+        self.tabs.addTab(self.tab_revision, "🔍 RÉVISION")
+        self.tabs.addTab(self.tab_duplicates, "👯 DOUBLONS")
         
-        self.gpu_label = QLabel("GPU: --% | VRAM: --/-- MB")
-        self.gpu_bar = QProgressBar()
-        self.gpu_bar.setFixedWidth(150)
+        self._setup_scan_tab()
+        self._setup_results_tab()
+        self._setup_revision_tab()
 
-        top_layout.addWidget(self.btn_scan)
-        top_layout.addStretch()
-        top_layout.addWidget(self.gpu_label)
-        top_layout.addWidget(self.gpu_bar)
-        main_layout.addLayout(top_layout)
+    def _apply_theme(self):
+        """Design system 'Deep Obsidian Dark'."""
+        self.setStyleSheet("""
+            QMainWindow { background-color: #1a1a1a; }
+            QTabWidget::pane { border: 1px solid #333; background: #1a1a1a; }
+            QTabBar::tab { background: #2d2d2d; color: #888; padding: 10px 20px; }
+            QTabBar::tab:selected { background: #1a1a1a; color: #00f2ff; border-bottom: 2px solid #00f2ff; }
+            QPushButton { background-color: #00f2ff; color: #000; font-weight: bold; border-radius: 4px; padding: 8px; }
+            QPushButton:hover { background-color: #00c8d4; }
+            QTableWidget { background-color: #262626; color: #eee; gridline-color: #333; }
+        """)
 
-        # TABLE
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels([
-            "Fichier", "Bitrate", "Score ML", "Fake HQ", "Arbitrage LLM", "Verdict", "Hash"
-        ])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.itemSelectionChanged.connect(self._on_selection_changed)
-        main_layout.addWidget(self.table)
+    def _setup_scan_tab(self):
+        layout = QVBoxLayout(self.tab_scan)
+        
+        self.btn_select = QPushButton("SÉLECTIONNER UN DOSSIER À ANALYSER")
+        self.btn_select.clicked.connect(self._open_folder_dialog)
+        
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setStyleSheet("QProgressBar::chunk { background-color: #00f2ff; }")
+        
+        self.log_output = QLabel("Prêt pour l'analyse...")
+        self.log_output.setAlignment(Qt.AlignCenter)
+        
+        layout.addStretch()
+        layout.addWidget(self.btn_select)
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.log_output)
+        layout.addStretch()
 
-        # --- SECTION VISUALISATION ---
-        viz_container = QWidget()
-        viz_layout = QHBoxLayout(viz_container)
-        self.figure, (self.ax_wave, self.ax_spec) = plt.subplots(1, 2, figsize=(12, 4))
-        self.figure.patch.set_facecolor('#f0f0f0')
+    def _setup_results_tab(self):
+        layout = QVBoxLayout(self.tab_results)
+        self.results_table = QTableWidget(0, 5)
+        self.results_table.setHorizontalHeaderLabels(["Fichier", "Clipping", "SNR", "Suspicion", "Verdict"])
+        layout.addWidget(self.results_table)
+
+    def _setup_revision_tab(self):
+        """L'onglet Expert avec Waveform & Spectrogramme."""
+        layout = QHBoxLayout(self.tab_revision)
+        
+        # Côté gauche : Liste des fichiers en zone grise
+        self.review_list = QTableWidget(0, 2)
+        layout.addWidget(self.review_list, 1)
+        
+        # Côté droit : Visualisation & Contrôles
+        viz_layout = QVBoxLayout()
+        
+        self.figure, (self.ax_wave, self.ax_spec) = plt.subplots(2, 1, figsize=(6, 8))
+        self.figure.patch.set_facecolor('#1a1a1a')
         self.canvas = FigureCanvas(self.figure)
+        
         viz_layout.addWidget(self.canvas)
-        main_layout.addWidget(viz_container)
+        
+        btn_layout = QHBoxLayout()
+        self.btn_good = QPushButton("✓ MARQUER COMME BON")
+        self.btn_good.setStyleSheet("background-color: #2ecc71; color: white;")
+        self.btn_ban = QPushButton("✗ BANNIR (FAUX HQ / DÉFAUT)")
+        self.btn_ban.setStyleSheet("background-color: #e74c3c; color: white;")
+        
+        btn_layout.addWidget(self.btn_good)
+        btn_layout.addWidget(self.btn_ban)
+        viz_layout.addLayout(btn_layout)
+        
+        layout.addLayout(viz_layout, 2)
 
-    # --- OPTIMISATION 2 : Mise à jour via Signal (Thread-Safe) ---
-    def process_new_analysis(self, metrics):
-        """Appelé par app.py via le signal AnalysisWorker.result"""
-        self.add_result_to_table(metrics)
-        # On pourrait ici forcer l'affichage si c'est le premier résultat
-        if self.table.rowCount() == 1:
-            self.table.selectRow(0)
-
-    def add_result_to_table(self, m):
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-        
-        # Remplissage des cellules
-        self.table.setItem(row, 0, QTableWidgetItem(os.path.basename(m['path'])))
-        self.table.setItem(row, 1, QTableWidgetItem(f"{m['meta']['bitrate']}k"))
-        
-        ml_item = QTableWidgetItem(f"{m['ml_score']:.2f}")
-        self.table.setItem(row, 2, ml_item)
-        
-        hq_txt = "⚠️ FAKE" if m['is_fake_hq'] > 0.5 else "OK"
-        hq_item = QTableWidgetItem(hq_txt)
-        if m['is_fake_hq'] > 0.5: hq_item.setForeground(Qt.red)
-        self.table.setItem(row, 3, hq_item)
-        
-        self.table.setItem(row, 4, QTableWidgetItem(m.get('llm_decision', 'AUTO')))
-        
-        # Feedback Buttons (Renforcement ML)
-        btn_widget = QWidget()
-        btn_layout = QHBoxLayout(btn_widget)
-        btn_layout.setContentsMargins(2, 2, 2, 2)
-        
-        btn_ban = QPushButton("BAN")
-        btn_ban.setStyleSheet("background-color: #e74c3c; color: white; font-size: 10px;")
-        btn_ban.clicked.connect(lambda: self.label_submitted.emit(m['hash'], "Ban"))
-        
-        btn_ok = QPushButton("GOOD")
-        btn_ok.setStyleSheet("background-color: #2ecc71; color: white; font-size: 10px;")
-        btn_ok.clicked.connect(lambda: self.label_submitted.emit(m['hash'], "Good"))
-        
-        btn_layout.addWidget(btn_ok)
-        btn_layout.addWidget(btn_ban)
-        self.table.setCellWidget(row, 5, btn_widget)
-        
-        # Cache pour le path (utilisé par la sélection)
-        hash_item = QTableWidgetItem(m['hash'])
-        hash_item.setData(Qt.UserRole, m['path']) 
-        self.table.setItem(row, 6, hash_item)
-
-    # --- OPTIMISATION 3 : Spectrogramme Rapide ---
-    def update_plots(self, file_path):
-        """Diagnostic visuel optimisé pour la fluidité de l'UI."""
-        try:
-            # Charge 5s après un offset de 10s (pour éviter les silences de début)
-            y, sr = librosa.load(file_path, duration=5, offset=10)
-            
-            self.ax_wave.clear()
-            self.ax_spec.clear()
-            
-            # Waveform
-            self.ax_wave.plot(y, color='#3498db', alpha=0.7)
-            self.ax_wave.set_title("Waveform (Clipping Check)")
-            self.ax_wave.grid(True, alpha=0.3)
-            
-            # Spectrogramme léger (n_fft réduit)
-            S = librosa.feature.melspectrogram(y=y, sr=sr, n_fft=1024, hop_length=512)
-            S_db = librosa.power_to_db(S, ref=np.max)
-            librosa.display.specshow(S_db, x_axis='time', y_axis='mel', sr=sr, ax=self.ax_spec)
-            self.ax_spec.set_title("Spectro (Fake HQ Check)")
-            
-            self.canvas.draw_idle() 
-        except Exception as e:
-            print(f"Erreur Viz: {e}")
-
-    def _on_selection_changed(self):
-        selected_rows = self.table.selectionModel().selectedRows()
-        if selected_rows:
-            row = selected_rows[0].row()
-            path = self.table.item(row, 6).data(Qt.UserRole)
-            if path != self.current_selected_path:
-                self.current_selected_path = path
-                self.update_plots(path)
-
-    def _update_gpu_stats(self):
-        if self.has_gpu and self.config['ui_settings']['gpu_monitoring']:
-            util = pynvml.nvmlDeviceGetUtilizationRates(self.gpu_handle)
-            mem = pynvml.nvmlDeviceGetMemoryInfo(self.gpu_handle)
-            used_mb = mem.used // 1024**2
-            total_mb = mem.total // 1024**2
-            self.gpu_label.setText(f"GPU: {util.gpu}% | VRAM: {used_mb}/{total_mb} MB")
-            self.gpu_bar.setValue(util.gpu)
-
-    def _on_scan_clicked(self):
-        folder = QFileDialog.getExistingDirectory(self, "Dossier Musique")
+    def _open_folder_dialog(self):
+        folder = QFileDialog.getExistingDirectory(self, "Sélectionner Dossier")
         if folder:
-            self.scan_requested.emit(folder)
+            self.request_scan.emit(folder)
+
+    @Slot(dict)
+    def update_results(self, data):
+        """Met à jour le tableau des résultats en temps réel."""
+        row = self.results_table.rowCount()
+        self.results_table.insertRow(row)
+        self.results_table.setItem(row, 0, QTableWidgetItem(os.path.basename(data['path'])))
+        self.results_table.setItem(row, 1, QTableWidgetItem(f"{data['dsp']['clipping']:.2f}%"))
+        self.results_table.setItem(row, 2, QTableWidgetItem(f"{data['dsp']['snr']:.1f} dB"))
+        
+        score_item = QTableWidgetItem(f"{data['ml_score']:.2f}")
+        # Coloration dynamique selon suspicion
+        if data['ml_score'] > 0.7: score_item.setForeground(Qt.red)
+        elif data['ml_score'] < 0.4: score_item.setForeground(Qt.green)
+        
+        self.results_table.setItem(row, 3, QTableWidgetItem(score_item))
+
+    @Slot(object, object)
+    def draw_visuals(self, times, waveform, spectrogram):
+        """Affiche les graphiques sans bloquer l'UI."""
+        self.ax_wave.clear()
+        self.ax_spec.clear()
+        
+        self.ax_wave.plot(times, waveform, color='#00f2ff', linewidth=0.5)
+        self.ax_wave.set_facecolor('#1a1a1a')
+        self.ax_wave.axis('off')
+        
+        self.ax_spec.imshow(spectrogram, aspect='auto', origin='lower', cmap='inferno')
+        self.ax_spec.axis('off')
+        
+        self.canvas.draw()

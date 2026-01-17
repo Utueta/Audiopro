@@ -1,68 +1,39 @@
-import weakref
-from collections import ChainMap
+from PySide6.QtCore import QObject, QThreadPool, Signal, Slot
+from core.workers import AnalysisWorker
+from core.analyzer.pipeline import AudioAnalyzer
+from persistence.repository import AudioRepository
+from core.models import AnalysisResult
 
-from numba.core import types
+class AnalysisManager(QObject):
+    """The Hexagon Orchestrator: Connects UI to Core/Repo."""
+    
+    # Signal to notify UI that a new result is ready for rendering
+    analysis_ready = Signal(AnalysisResult)
 
+    def __init__(self, thread_pool: QThreadPool, repository: AudioRepository):
+        super().__init__()
+        self.thread_pool = thread_pool
+        self.repository = repository
+        self.analyzer = AudioAnalyzer()
 
-class DataModelManager(object):
-    """Manages mapping of FE types to their corresponding data model
-    """
+    def request_analysis(self, file_path: str):
+        """Public entry point for the non-blocking pipeline."""
+        worker = AnalysisWorker(file_path, self.analyzer.analyze_file)
+        
+        # Connect internal workers to safe main-thread slots
+        worker.signals.result.connect(self._on_result_received)
+        
+        self.thread_pool.start(worker)
 
-    def __init__(self, handlers=None):
-        """
-        Parameters
-        -----------
-        handlers: Mapping[Type, DataModel] or None
-            Optionally provide the initial handlers mapping.
-        """
-        # { numba type class -> model factory }
-        self._handlers = handlers or {}
-        # { numba type instance -> model instance }
-        self._cache = weakref.WeakKeyDictionary()
-
-    def register(self, fetypecls, handler):
-        """Register the datamodel factory corresponding to a frontend-type class
-        """
-        assert issubclass(fetypecls, types.Type)
-        self._handlers[fetypecls] = handler
-
-    def lookup(self, fetype):
-        """Returns the corresponding datamodel given the frontend-type instance
-        """
-        try:
-            return self._cache[fetype]
-        except KeyError:
-            pass
-        handler = self._handlers[type(fetype)]
-        model = self._cache[fetype] = handler(self, fetype)
-        return model
-
-    def __getitem__(self, fetype):
-        """Shorthand for lookup()
-        """
-        return self.lookup(fetype)
-
-    def copy(self):
-        """
-        Make a copy of the manager.
-        Use this to inherit from the default data model and specialize it
-        for custom target.
-        """
-        return DataModelManager(self._handlers.copy())
-
-    def chain(self, other_manager):
-        """Create a new DataModelManager by chaining the handlers mapping of
-        `other_manager` with a fresh handlers mapping.
-
-        Any existing and new handlers inserted to `other_manager` will be
-        visible to the new manager. Any handlers inserted to the new manager
-        can override existing handlers in `other_manager` without actually
-        mutating `other_manager`.
-
-        Parameters
-        ----------
-        other_manager: DataModelManager
-        """
-        chained = ChainMap(self._handlers, other_manager._handlers)
-        return DataModelManager(chained)
-
+    @Slot(AnalysisResult)
+    def _on_result_received(self, result: AnalysisResult):
+        """Main Thread handler for persistence and UI notification."""
+        if result.success:
+            # 1. Persist to DB (using the WAL-ready repository)
+            self.repository.save_result(result)
+            
+            # 2. Notify UI components for live update
+            self.analysis_ready.emit(result)
+        else:
+            # Traceability: Ensure failures are visible in the logs
+            print(f"Manager received error: {result.error}")

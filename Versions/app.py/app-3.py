@@ -1,98 +1,84 @@
-import sys, json, os
-from PySide6.QtWidgets import *
-from PySide6.QtCore import *
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+import sys
+import os
+import json
+import logging
+from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtCore import Qt, QThreadPool
+
+from view import AudioExpertView
+from splash_screen import SplashScreen
 from analyzer import AudioAnalyzer
-from model import AudioModel
-from view import MainView
+from model import FraudModel
+from services.llm_service import LLMService
+from workers import AnalysisWorker
 
-class AnalysisWorker(QRunnable):
-    class Signals(QObject):
-        result = Signal(dict)
-    def __init__(self, path, analyzer):
-        super().__init__()
-        self.path, self.analyzer, self.signals = path, analyzer, self.Signals()
-    def run(self):
-        self.signals.result.emit(self.analyzer.get_metrics(self.path))
-
-class AudioApp:
+class AudioExpertApp:
     def __init__(self):
-        with open('config.json', 'r') as f: self.config = json.load(f)
-        self.model = AudioModel(self.config['paths']['db_name'])
+        self.config_path = "config.json"
+        self.config = self._load_config()
+        self._setup_logging()
+
+        # Initialisation des Moteurs
         self.analyzer = AudioAnalyzer(self.config)
-        self.view = MainView()
+        self.model = FraudModel(self.config)
+        self.llm = LLMService(self.config)
+
+        # Threading & Performance
         self.threadpool = QThreadPool()
-        self.player = QMediaPlayer()
-        self.audio_output = QAudioOutput()
-        self.player.setAudioOutput(self.audio_output)
-        self.results = []
+        max_t = self.config.get('performance', {}).get('max_threads', 4)
+        self.threadpool.setMaxThreadCount(max_t)
+
+        self.view = AudioExpertView(self.config)
         self._connect_signals()
 
+    def _load_config(self):
+        if not os.path.exists(self.config_path):
+            sys.exit(1)
+        with open(self.config_path, "r", encoding='utf-8') as f:
+            return json.load(f)
+
+    def _setup_logging(self):
+        log_path = self.config['paths']['log_path']
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        logging.basicConfig(
+            filename=log_path,
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+
     def _connect_signals(self):
-        self.view.btn_start.clicked.connect(self.run_pipeline)
-        self.view.btn_clean_duplicates.clicked.connect(self.clean_duplicates)
-        self.view.table.itemSelectionChanged.connect(self.load_selection)
-        self.view.btn_good.clicked.connect(lambda: self.save_decision("Bon"))
-        self.view.btn_bad.clicked.connect(lambda: self.save_decision("Ban"))
+        self.view.scan_requested.connect(self.dispatch_worker)
+        self.view.feedback_given.connect(self.model.update_feedback)
 
-    def run_pipeline(self):
-        folder = QFileDialog.getExistingDirectory(None, "Sélectionner Dossier")
-        if not folder: return
-        exts = tuple(self.config['audio']['extensions'])
-        files = [os.path.join(r, f) for r, _, fs in os.walk(folder) for f in fs if f.lower().endswith(exts)]
+    def dispatch_worker(self, file_path):
+        logging.info(f"Analyse lancée : {file_path}")
+        worker = AnalysisWorker(file_path, self.analyzer, self.model, self.llm)
         
-        self.results = []
-        self.view.table.setRowCount(0)
-        self.progress = QProgressDialog("Analyse Parallèle...", "Stop", 0, len(files), self.view)
+        # Axe A : Flux de signaux asynchrones
+        worker.signals.dsp_ready.connect(self.view.handle_dsp_ready)
+        worker.signals.result.connect(self.on_analysis_finished)
+        worker.signals.error.connect(lambda e: logging.error(f"Erreur Worker: {e}"))
         
-        for path in files:
-            worker = AnalysisWorker(path, self.analyzer)
-            worker.signals.result.connect(self.on_result)
-            self.threadpool.start(worker)
+        self.threadpool.start(worker)
 
-    def on_result(self, data):
-        # Prédiction ML proactive
-        data['ml_score'] = self.model.predict_suspicion(data)
-        self.results.append(data)
-        self.model.add_to_queue(data)
-        
-        row = self.view.table.rowCount()
-        self.view.table.insertRow(row)
-        self.view.table.setItem(row, 1, QTableWidgetItem(os.path.basename(data['path'])))
-        self.view.table.setItem(row, 2, QTableWidgetItem(f"{data['ml_score']:.4f}"))
-        self.progress.setValue(len(self.results))
+    def on_analysis_finished(self, results):
+        self.view.handle_analysis_result(results)
+        self.model.save_analysis(results, results['score'])
+        logging.info(f"Analyse terminée : {results['filename']}")
 
-    def load_selection(self):
-        row = self.view.table.currentRow()
-        if row < 0: return
-        res = self.results[row]
-        ts = res['defect_timestamps'][0] if res.get('defect_timestamps') else 0
-        self.view.update_visuals(res['path'], ts)
-        self.player.setSource(QUrl.fromLocalFile(res['path']))
-
-    def save_decision(self, label):
-        row = self.view.table.currentRow()
-        if row >= 0:
-            self.model.mark_file(self.results[row]['path'], label)
-            self.view.table.setItem(row, 3, QTableWidgetItem(label))
-
-    def clean_duplicates(self):
-        hashes = {}
-        for r in self.results:
-            h = r['hash']
-            if h == "0": continue
-            if h not in hashes: hashes[h] = r
-            else:
-                old = hashes[h]
-                # On garde le meilleur bitrate
-                to_remove = r if old['meta']['bitrate'] >= r['meta']['bitrate'] else old
-                hashes[h] = r if old['meta']['bitrate'] < r['meta']['bitrate'] else old
-                row = self.view.table_dup.rowCount()
-                self.view.table_dup.insertRow(row)
-                self.view.table_dup.setItem(row, 0, QTableWidgetItem(os.path.basename(to_remove['path'])))
+    def run(self):
+        splash = SplashScreen(self.config)
+        splash.show()
+        if splash.run_checks():
+            splash.close()
+            self.view.show()
+        else:
+            QMessageBox.critical(None, "System Error", "Échec des tests de santé (Ollama/Dossiers).")
+            sys.exit(1)
 
 if __name__ == "__main__":
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
     app = QApplication(sys.argv)
-    ctrl = AudioApp()
-    ctrl.view.show()
+    core = AudioExpertApp()
+    core.run()
     sys.exit(app.exec())

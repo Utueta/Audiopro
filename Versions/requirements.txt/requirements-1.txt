@@ -1,9 +1,26 @@
+# --- CORE UI (Obsidian Glow & PySide6) ---
 PySide6>=6.5.0
-librosa>=0.10.0
+qt-material>=2.14  # Optionnel pour des thèmes sombres avancés
+
+# --- DSP & MATH PRECISION (Signal Analysis) ---
 numpy>=1.24.0
-scikit-learn>=1.2.0
-matplotlib>=3.7.0
-mutagen>=1.46.0
-psutil>=5.9.0
-joblib>=1.3.0
+librosa==0.10.1
+scipy>=1.10.0
 soundfile>=0.12.1
+resampy>=0.4.0
+
+# --- MACHINE LEARNING & BRAIN (Inference) ---
+scikit-learn>=1.3.0
+joblib>=1.3.0
+pandas>=2.0.0
+
+# --- CONNECTIVITY (LLM Arbitrator) ---
+requests>=2.31.0
+urllib3>=2.0.0
+
+# --- VISUALIZATION (Obsidian Graphics) ---
+matplotlib>=3.8.0
+
+# --- UTILS & DEVSCOPS ---
+python-dotenv>=1.0.0
+psutil>=5.9.0
