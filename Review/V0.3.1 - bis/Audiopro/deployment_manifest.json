@@ -1,0 +1,17 @@
+{
+  "system_id": "audiopro-industrial-v031",
+  "version": "0.3.1",
+  "status": "STABLE",
+  "subsystems": {
+    "persistence": {
+      "engine": "SQLite3",
+      "mode": "WAL",
+      "database": "database/audiopro_v03.db"
+    },
+    "intelligence": {
+      "local_ml": "RandomForestClassifier",
+      "scaler": "Z-Score Scaler v0.3",
+      "arbitrator": "Qwen-2.5"
+    }
+  }
+}
