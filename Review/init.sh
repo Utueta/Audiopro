@@ -1,95 +1,134 @@
 #!/bin/bash
+#"""
+# Audiopro v0.3.1
+# - Handles repository scaffolding for the canonical Audiopro file tree.
+#"""
 
-# Project Root Name
-PROJECT_NAME="Audiopro"
-COPIED_FILES=()
+set -euo pipefail
 
-echo "-------------------------------------------------------"
-echo "Industrial System Setup: $PROJECT_NAME (v0.2.5 Compliant)"
-echo "-------------------------------------------------------"
+echo "--- Audiopro v0.3.1: Canonical Tree Initializer ---"
 
-# 1. Define the directory array based on the v0.2.5 manifest
-directories=(
-    "$PROJECT_NAME/core/analyzer"
-    "$PROJECT_NAME/core/brain/weights"
-    "$PROJECT_NAME/services"
-    "$PROJECT_NAME/persistence"
-    "$PROJECT_NAME/ui/components"
-    "$PROJECT_NAME/database"
-    "$PROJECT_NAME/logs"
-    "$PROJECT_NAME/assets/icons"
-    "$PROJECT_NAME/scripts"
-    "$PROJECT_NAME/docs"
+# Canonical placement: init.sh at repo root.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT"
+
+echo "Repo root: $REPO_ROOT"
+
+DIRS=(
+  "core/analyzer"
+  "core/brain/weights"
+  "persistence"
+  "services"
+  "ui/components"
+  "scripts"
+  "database"
+  "logs"
+  "assets/icons"
+  "tests/fixtures"
+  "docs"
 )
 
-# Create missing subfolders
-for dir in "${directories[@]}"; do
-    if [ ! -d "$dir" ]; then
-        echo "[+] Creating directory: $dir"
-        mkdir -p "$dir"
-    fi
+for d in "${DIRS[@]}"; do
+  mkdir -p "$d"
 done
 
-# 2. Create __init__.py for Python package recognition
-python_packages=(
-    "$PROJECT_NAME/core"
-    "$PROJECT_NAME/core/analyzer"
-    "$PROJECT_NAME/core/brain"
-    "$PROJECT_NAME/services"
-    "$PROJECT_NAME/persistence"
-    "$PROJECT_NAME/ui"
-    "$PROJECT_NAME/ui/components"
-)
+create_if_missing() {
+  local path="$1"
+  local mode="${2:-}"
+  if [ -f "$path" ]; then
+    return 0
+  fi
+  echo "Creating: $path"
+  mkdir -p "$(dirname "$path")"
+  cat > "$path"
+  if [ -n "$mode" ]; then
+    chmod "$mode" "$path"
+  fi
+}
 
-for pkg in "${python_packages[@]}"; do
-    touch "$pkg/__init__.py"
-done
+create_placeholder_py() {
+  local path="$1"
+  local use_case="$2"
+  if [ -f "$path" ]; then
+    return 0
+  fi
+  create_if_missing "$path" "" <<EOF
+#"""
+# Audiopro v0.3.1
+# - Handles the ${use_case}.
+#"""
 
-# 3. Synchronize Files to New Structure
-echo "[+] Migrating project files..."
+# Planned / Deferred placeholder.
+# Implement only when explicitly approved.
 
-# Root Level
-for file in app.py logging_config.py requirements.txt README.md; do
-    [ -f "$file" ] && cp "$file" "$PROJECT_NAME/" && COPIED_FILES+=("$file")
-done
+EOF
+}
 
-# Core Logic
-for file in manager.py workers.py; do
-    [ -f "$file" ] && cp "$file" "$PROJECT_NAME/core/" && COPIED_FILES+=("core/$file")
-done
+create_placeholder_md() {
+  local path="$1"
+  local title="$2"
+  if [ -f "$path" ]; then
+    return 0
+  fi
+  create_if_missing "$path" "" <<EOF
+# ${title}
 
-# Analyzer Subsystem
-for file in pipeline.py dsp.py spectral.py metadata.py; do
-    [ -f "$file" ] && cp "$file" "$PROJECT_NAME/core/analyzer/" && COPIED_FILES+=("core/analyzer/$file")
-done
+<!--
+Audiopro v0.3.1
+Planned / Deferred.
+Create content only when explicitly approved.
+-->
 
-# Brain Subsystem
-for file in random_forest.py; do
-    [ -f "$file" ] && cp "$file" "$PROJECT_NAME/core/brain/" && COPIED_FILES+=("core/brain/$file")
-done
+EOF
+}
 
-# Services (AI Providers)
-for file in llm_interface.py ollama_llm.py; do
-    [ -f "$file" ] && cp "$file" "$PROJECT_NAME/services/" && COPIED_FILES+=("services/$file")
-done
+create_placeholder_qss() {
+  local path="$1"
+  if [ -f "$path" ]; then
+    return 0
+  fi
+  create_if_missing "$path" "" <<EOF
+/*"""
+Audiopro v0.3.1
+- Handles the Qt stylesheet theme (Planned / Deferred).
+"""*/
 
-# Persistence (Database)
-for file in repository.py; do
-    [ -f "$file" ] && cp "$file" "$PROJECT_NAME/persistence/" && COPIED_FILES+=("persistence/$file")
-done
+/* Planned / Deferred placeholder. */
 
-# UI & Components
-for file in view.py styles.py; do
-    [ -f "$file" ] && cp "$file" "$PROJECT_NAME/ui/" && COPIED_FILES+=("ui/$file")
-done
-[ -f "gauges.py" ] && cp "gauges.py" "$PROJECT_NAME/ui/components/" && COPIED_FILES+=("ui/components/gauges.py")
+EOF
+}
 
-# Scripts & Maintenance
-for file in init_model.py test_engine.py; do
-    [ -f "$file" ] && cp "$file" "$PROJECT_NAME/scripts/" && COPIED_FILES+=("scripts/$file")
-done
+# Planned / Deferred artifacts (explicitly permitted by canonical structure)
+create_placeholder_py "services/mock_llm.py" "LLM provider testing stub (Planned / Deferred)"
+create_placeholder_qss "ui/theme.qss"
+create_placeholder_py "tests/test_model.py" "ML inference tests (Planned / Deferred)"
+create_placeholder_py "tests/test_llm_service.py" "LLM bridge tests (Planned / Deferred)"
+create_placeholder_py "tests/test_repository.py" "Persistence tests (Planned / Deferred)"
+create_placeholder_md "docs/RELEASE_NOTES.md" "Release Notes"
+create_placeholder_md "docs/CERTIFICATION_REPORT.md" "Certification Report"
 
-echo "-------------------------------------------------------"
-echo "Migration Complete: ${#COPIED_FILES[@]} files synchronized."
-echo "Target: ./$PROJECT_NAME"
-echo "-------------------------------------------------------"
+# Logs (do not overwrite)
+create_if_missing "logs/analysis.log" ""
+create_if_missing "logs/system.log" ""
+
+# .gitignore (do not overwrite)
+if [ ! -f ".gitignore" ]; then
+  echo "Creating: .gitignore"
+  cat > ".gitignore" <<'EOF'
+#"""
+# Audiopro v0.3.1
+# - Handles git ignore rules for logs and local databases.
+#"""
+
+logs/
+*.log
+
+database/
+*.db
+
+__pycache__/
+*.pyc
+EOF
+fi
+
+echo "Canonical tree initialization complete."

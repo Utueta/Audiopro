@@ -1,0 +1,42 @@
+"""
+Audiopro v0.3.1
+Handles the global orchestration of thresholds and paths (Obsidian Pro Edition).
+"""
+{
+    "project_info": {
+        "version": "0.3.1",
+        "edition": "Obsidian Pro",
+        "developer_mode": false
+    },
+    "paths": {
+        "db_path": "database/audiopro_v03.db",
+        "model_path": "core/brain/weights/random_forest.pkl",\n        "scaler_path": "core/brain/weights/scaler_v0.3.pkl",
+        "log_path": "logs/system.log",
+        "assets_path": "assets/"
+    },
+    "audio": {
+        "sample_duration_sec": 45,
+        "extensions": [".flac", ".wav", ".alac", ".mp3", ".m4a"],
+        "analysis_params": {
+            "clipping_sensitivity": 0.98,
+            "snr_min_db": 20.0
+        }
+    },
+    "ml_engine": {
+        "auto_weight_adjust": true,
+        "retrain_every": 5,
+        "sentinel_weights": {
+            "snr": 0.6,
+            "clipping": 0.4
+        }
+    },
+    "llm": {
+        "enabled": true,
+        "model_name": "qwen2.5",
+        "api_url": "http://localhost:11434/api/generate",
+        "arbitration_zone": {
+            "min_score": 0.35,
+            "max_score": 0.75
+        }
+    }
+}

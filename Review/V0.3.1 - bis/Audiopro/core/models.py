@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 @dataclass(frozen=True, slots=True)
 class AnalysisResult:
     """Primary immutable data contract emitted by DSP and enriched by ML/LLM."""
+
     # Identification (Blake2b 128-bit hex)
     file_hash: str
     file_name: str
@@ -23,7 +24,7 @@ class AnalysisResult:
     clipping_count: int
     suspicion_score: float
 
-    # Metadata and provenance (container facts, SR, STFT profile, etc.)
+    # Metadata and provenance (container facts, SR, STFT profile, loading_mode, hash_io, etc.)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     # Intelligence & Arbitration
@@ -33,5 +34,15 @@ class AnalysisResult:
     llm_justification: Optional[str] = None
     llm_involved: bool = False
 
-    # Persistence timestamp (UTC ISO)
+    # Persistence timestamp (UTC)
     timestamp: datetime = field(default_factory=datetime.utcnow)
+
+    @property
+    def arbitration_status(self) -> str:
+        """Derived status to prevent dual sources of truth."""
+        if self.llm_involved:
+            return "AI_ARBITRATED"
+        if self.ml_classification == "PENDING":
+            return "PENDING"
+        return "LOCAL_ONLY"
+

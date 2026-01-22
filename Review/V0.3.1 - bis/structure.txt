@@ -1,77 +1,80 @@
 Audiopro/
-├── app.py                      # Entry point: Dependency Injection & UI Launch#
+├── app.py                      # Entry point: Dependency Injection & UI Launch
 ├── run_all.sh                  # Master Orchestrator: Health -> Calibration -> App
+├── init.sh                     # Project scaffolding / bootstrap helper
+├── deployment_manifest.json    # Deployment & environment metadata
 ├── config.json                 # Global configuration (paths & params)
 ├── requirements.txt            # Python dependencies (PySide6, librosa, etc.)
 ├── .gitignore                  # Protection (excludes logs/ and database/)
 │
 ├── core/                       # Domain Logic (Hexagonal Architecture)
-│   ├── __init__.py
 │   ├── logging_config.py       # Centralized Telemetry Engine
-│   ├── models.py               # Data Contracts (AnalysisResult, ClassificationResult)
-│   ├── analyzer/               # DSP Subsystem
-│   │   ├── __init__.py
-│   │   ├── pipeline.py         # Merged Facade: Security (Magic) + MD5 + DSP
-│   │   ├── dsp.py              # High-precision feature extraction
-│   │   ├── spectral.py         # Frequency analysis (Cutoff, Segments)
-│   │   └── metadata.py         # Bitrate/format extraction
-│   ├── brain/                  # Machine Learning Sentinel
-│   │   ├── __init__.py
-│   │   ├── model_interface.py  # Abstract Protocol for ML models
-│   │   ├── random_forest.py    # Sentinel Brain: Triage logic
-│   │   └── weights/            # Persistent model weights (.pkl)
+│   ├── telemetry.py            # NEW: psutil & WAL growth monitoring logic
+│   ├── models.py               # Data Contracts (AnalysisResult, etc.)
+│   ├── manager.py              # Orchestrator: Triage logic & Arbitration
 │   ├── workers.py              # Qt Async Wrappers (Analysis & Telemetry)
-│   └── manager.py              # Orchestrator: Triage logic & Hot-Reload
+│   ├── analyzer/               # DSP Subsystem
+│   │   ├── pipeline.py         # Analysis facade (ingest → DSP/features)
+│   │   ├── dsp.py              # High-precision feature extraction
+│   │   ├── dsp_profile.py      # Sample-rate adaptive STFT settings and numerical stability functions
+│   │   ├── spectral.py         # Frequency analysis (cutoff/segments)
+│   │   └── metadata.py         # Bitrate/format extraction
+│   └── brain/                  # Machine Learning Sentinel
+│       ├── model_interface.py  # Abstract Protocol for ML models
+│       ├── random_forest.py    # Sentinel Brain: Triage logic
+│       └── weights/            # Persistent model weights (.pkl)
+│           ├── random_forest.pkl
+│           └── scaler_v0.3.pkl
 │
 ├── persistence/                # Infrastructure: Data Storage
-│   ├── __init__.py
-│   ├── repository.py           # SQLite Adapter: WAL Mode & Ground Truth
+│   ├── repository.py           # SQLite adapter (WAL mode enabled)
 │   └── schema.py               # Database schema & migrations
 │
 ├── services/                   # Infrastructure: External APIs
-│   ├── __init__.py
 │   ├── llm_interface.py        # LLM Provider Protocol
 │   ├── ollama_llm.py           # Ollama / Qwen 2.5 Bridge implementation
 │   └── mock_llm.py             # Testing stub
 │
 ├── ui/                         # Presentation Layer (PySide6)
-│   ├── __init__.py
-│   ├── view.py                 # Main Dashboard & Signal Emitters
 │   ├── splash_screen.py        # Bootloader & diagnostics
-│   ├── components/             # Custom widgets
-│   │   ├── __init__.py
-│   │   ├── mini_player.py
-│   │   ├── gauges.py
-│   │   └── graphs.py
-│   └── theme.qss               # Stylesheet
-│
-├── database/                   # Data Storage
-│   └── audiopro_v03.db         # v0.3.1 Learning Vault
-│
-├── logs/                       # Execution Traces
-│   ├── analysis.log            # Audio scan logs
-│   └── system.log              # Critical errors and LLM logs
-│
-├── assets/                     # Graphic Resources
-│   └── icons/
-│
-├── tests/                      # PyTest Suite
-│   ├── __init__.py
-│   ├── test_pipeline.py        # DSP & Security Gate tests
-│   ├── test_model.py           # ML Inference tests
-│   ├── test_llm_service.py     # Bridge tests
-│   ├── test_repository.py      # Persistence tests
-│   └── fixtures/               # Test audio files
+│   ├── theme.qss               # Stylesheet
+│   ├── view.py                 # Main Dashboard & Signal Emitters
+│   └── components/             # Custom widgets
+│       ├── mini_player.py
+│       ├── gauges.py
+│       └── graphs.py
 │
 ├── scripts/                    # DevOps & Learning Loop
 │   ├── install_system_deps.sh  # OS library installer
 │   ├── retrain_model.py        # Learning Engine: SQL -> .pkl update
 │   ├── check_health.py         # Diagnostics: GPU & Ollama status
+│   ├── init_model.py           # Sentinel Brain initialization
 │   └── smi.sh                  # Resource monitoring
 │
-└── docs/                           # Documentation
-    ├── README.md                   # Welcome & overview
-    ├── TUTORIAL.md                 # User manual
-    ├── RELEASE_NOTES.md            # Version history
-    ├── ARCHITECTURE.md             # Hexagonal & Threading design
-    └── CERTIFICATION_REPORT.md     # Final certification
+├── database/                   # Data Storage
+│   ├── audiopro_v03.db         # Primary SQLite instance
+│   └── backups/                # NEW: Automated snapshots for integrity
+│
+├── logs/                       # Execution Traces
+│   ├── analysis.log            # Audio scan logs
+│   ├── system.log              # Infrastructure and I/O logs
+│   └── audit.csv               # MANDATORY: Forensic trace of deletions/AI decisions
+│
+├── assets/                     # Graphic Resources
+│   └── icons/
+│
+├── tests/                      # PyTest Suite
+│   ├── test_engine.py          # End-to-end system tests
+│   ├── test_pipeline.py        # DSP & ingest tests
+│   ├── test_model.py           # ML Inference tests
+│   ├── test_llm_service.py     # Bridge tests
+│   ├── test_repository.py      # Persistence tests
+│   └── fixtures/               # Test audio files
+│       └── sample_audio.wav
+│
+└── docs/                       # Documentation
+    ├── README.md               # Welcome & overview
+    ├── TUTORIAL.md             # User manual
+    ├── ARCHITECTURE.md         # Hexagonal & Threading design
+    ├── RELEASE_NOTES.md        # Version history
+    └── CERTIFICATION_REPORT.md # Final industrial certification

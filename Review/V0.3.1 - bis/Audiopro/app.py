@@ -13,9 +13,9 @@ from PySide6.QtWidgets import QApplication
 # 1. Domain & Infrastructure Imports
 from core.logging_config import setup_logging
 from core.manager import SystemManager
-from core.analyzer.pipeline import AudioPipeline
+from core.analyzer.pipeline import AudioAnalysisPipeline
 from core.brain.random_forest import AudioBrain
-from persistence.repository import AudioRepository
+from persistence.repository import AnalysisResultStore
 from services.ollama_llm import OllamaBridge
 from ui.view import AudioproDashboard
 from ui.splash_screen import AudioproSplashScreen
@@ -41,9 +41,9 @@ def bootstrap():
             config = json.load(f)
 
         # Initialize Hexagonal Layers
-        repository = AudioRepository(config['paths']['db_path'])
+        repository = AnalysisResultStore(config['paths']['db_path'])
         brain = AudioBrain(config['paths']['weights_path'])
-        pipeline = AudioPipeline()
+        pipeline = AudioAnalysisPipeline()
         llm_service = OllamaBridge(config['llm']['endpoint'])
         
         # Core Orchestrator
