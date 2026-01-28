@@ -1,0 +1,62 @@
+import sqlite3, pandas as pd, queue, threading, joblib, os, numpy as np
+from sklearn.ensemble import RandomForestRegressor
+
+class AudioModel:
+    def __init__(self, db_path):
+        self.db_path = db_path
+        self.write_queue = queue.Queue()
+        self.model_path = "trained_model.pkl"
+        self._init_db()
+        self.ml_model = RandomForestRegressor(n_estimators=100)
+        self.load_model()
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def _init_db(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""CREATE TABLE IF NOT EXISTS audio_data (
+                path TEXT PRIMARY KEY, hash TEXT, score REAL, label TEXT, 
+                artist TEXT, title TEXT, bitrate INTEGER, snr REAL, 
+                clipping REAL, is_fake_hq REAL, phase_corr REAL
+            )""")
+
+    def load_model(self):
+        if os.path.exists(self.model_path):
+            try: self.ml_model = joblib.load(self.model_path)
+            except: pass
+
+    def predict_suspicion(self, d):
+        try:
+            feats = np.array([[d['score'], d['snr'], d['clipping'], d['is_fake_hq'], d['phase_corr']]])
+            return float(self.ml_model.predict(feats)[0])
+        except: return d['score']
+
+    def retrain(self):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                df = pd.read_sql("SELECT score, snr, clipping, is_fake_hq, phase_corr, label FROM audio_data WHERE label IN ('Bon', 'Ban')", conn)
+            if len(df) >= 5:
+                X = df[['score', 'snr', 'clipping', 'is_fake_hq', 'phase_corr']].fillna(0)
+                y = df['label'].apply(lambda x: 1 if x == 'Ban' else 0)
+                self.ml_model.fit(X, y)
+                joblib.dump(self.ml_model, self.model_path)
+                return True
+            return False
+        except: return False
+
+    def mark_file(self, path, label):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE audio_data SET label = ? WHERE path = ?", (label, path))
+        self.retrain()
+
+    def add_to_queue(self, data):
+        self.write_queue.put(data)
+
+    def _worker(self):
+        while True:
+            item = self.write_queue.get()
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("INSERT OR REPLACE INTO audio_data VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (item['path'], item['hash'], item['score'], item.get('status'), 
+                     item['meta']['artist'], item['meta']['title'], item['meta']['bitrate'],
+                     item.get('snr', 0), item.get('clipping', 0), item.get('is_fake_hq', 0), item.get('phase_corr', 1.0)))
+            self.write_queue.task_done()

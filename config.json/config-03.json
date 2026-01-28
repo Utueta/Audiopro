@@ -1,0 +1,248 @@
+{
+  "_comment": "=================================================================",
+  "_description": "Audiopro Global Configuration",
+  "_architecture": "ARCHITECTURE.MD §1 - Infrastructure Control",
+  "_purpose": "Provides global parameters for thresholds and file paths across all layers",
+  "_comment2": "=================================================================",
+
+  "application": {
+    "name": "Audiopro",
+    "version": "1.0.0",
+    "environment": "production",
+    "debug_mode": false
+  },
+
+  "database": {
+    "_comment": "ARCHITECTURE.MD §3 - Persistence & Data Integrity",
+    "path": "database/audiopro_v01.db",
+    "wal_mode": true,
+    "synchronous": "NORMAL",
+    "backup": {
+      "enabled": true,
+      "interval_hours": 24,
+      "max_backups": 7,
+      "path": "database/backups"
+    }
+  },
+
+  "models": {
+    "_comment": "ARCHITECTURE.MD §1 - Intelligence & Arbitrage",
+    "weights_path": "core/brain/weights",
+    "model_file": "model.pkl",
+    "scaler_file": "scaler.pkl",
+    "random_forest": {
+      "n_estimators": 100,
+      "max_depth": 10,
+      "min_samples_split": 5,
+      "min_samples_leaf": 2,
+      "random_state": 42
+    },
+    "auto_save_on_correction": true
+  },
+
+  "services": {
+    "_comment": "ARCHITECTURE.MD §2 - Async/Qt Integration",
+    "ollama": {
+      "base_url": "http://localhost:11434",
+      "model_name": "qwen2.5:7b-instruct",
+      "timeout": 30,
+      "fallback_to_mock": true,
+      "retry_attempts": 2,
+      "retry_delay": 1
+    }
+  },
+
+  "analysis": {
+    "_comment": "ARCHITECTURE.MD §1 - Intelligence & Arbitrage",
+    "llm_confidence_threshold": 0.85,
+    "enable_llm_arbitration": true,
+    "cache_results": true,
+    "cache_ttl_hours": 168,
+    "thresholds": {
+      "clipping_detection": 0.99,
+      "rms_low_db": -60,
+      "rms_high_db": -3,
+      "dynamic_range_min_db": 6,
+      "spectral_cutoff_min_khz": 15
+    }
+  },
+
+  "threading": {
+    "_comment": "ARCHITECTURE.MD §2 - Threading Model & Concurrency Safety",
+    "max_workers": null,
+    "_max_workers_comment": "null = auto-detect (CPU cores), or specify integer",
+    "worker_timeout_ms": 300000,
+    "_worker_timeout_comment": "5 minutes per file analysis",
+    "shutdown_timeout_ms": 5000,
+    "queue_size": 100
+  },
+
+  "memory": {
+    "_comment": "ARCHITECTURE.MD §4 - Memory-Scoped Analysis",
+    "clear_buffers_immediately": true,
+    "max_audio_buffer_mb": 500,
+    "gc_after_analysis": true
+  },
+
+  "logging": {
+    "_comment": "ARCHITECTURE.MD §4 - Log Segregation",
+    "level": "INFO",
+    "_level_options": "DEBUG, INFO, WARNING, ERROR, CRITICAL",
+    "system_log": "logs/system.log",
+    "analysis_log": "logs/analysis.log",
+    "max_file_size_mb": 50,
+    "backup_count": 5,
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "log_to_console": true,
+    "analysis_telemetry": {
+      "log_dsp_features": true,
+      "log_ml_predictions": true,
+      "log_llm_responses": true,
+      "log_timing": true
+    }
+  },
+
+  "ui": {
+    "_comment": "User interface settings",
+    "theme": "deep_obsidian_dark",
+    "window": {
+      "width": 1400,
+      "height": 900,
+      "min_width": 1024,
+      "min_height": 768
+    },
+    "splash_screen": {
+      "enabled": true,
+      "logo_path": "assets/logo.png",
+      "min_display_ms": 1000
+    },
+    "auto_refresh_interval_ms": 1000,
+    "max_table_rows": 1000
+  },
+
+  "paths": {
+    "_comment": "File system paths",
+    "assets": "assets",
+    "logs": "logs",
+    "database": "database",
+    "scripts": "scripts",
+    "weights": "core/brain/weights",
+    "temp": "temp",
+    "exports": "exports"
+  },
+
+  "health_checks": {
+    "_comment": "ARCHITECTURE.MD §4 - Pre-flight Health Checks",
+    "run_on_startup": true,
+    "checks": {
+      "cuda": {
+        "enabled": true,
+        "required": false,
+        "script": "scripts/smi.sh"
+      },
+      "ollama": {
+        "enabled": true,
+        "required": true,
+        "url": "http://localhost:11434"
+      },
+      "ffmpeg": {
+        "enabled": true,
+        "required": true
+      },
+      "database_schema": {
+        "enabled": true,
+        "required": false
+      },
+      "model_weights": {
+        "enabled": true,
+        "required": true
+      }
+    }
+  },
+
+  "features": {
+    "_comment": "Feature flags for experimental/optional features",
+    "enable_batch_processing": true,
+    "enable_export": true,
+    "enable_statistics_dashboard": true,
+    "enable_user_feedback": true,
+    "enable_incremental_learning": true,
+    "enable_gpu_acceleration": true
+  },
+
+  "performance": {
+    "_comment": "Performance tuning parameters",
+    "dsp": {
+      "fft_size": 2048,
+      "hop_length": 512,
+      "use_gpu_if_available": true
+    },
+    "ml": {
+      "n_jobs": -1,
+      "_n_jobs_comment": "-1 = use all CPU cores"
+    },
+    "database": {
+      "batch_insert_size": 100,
+      "connection_timeout": 10
+    }
+  },
+
+  "quality_classes": {
+    "_comment": "Audio quality classification labels",
+    "labels": [
+      "excellent",
+      "good",
+      "acceptable",
+      "poor",
+      "needs_review"
+    ],
+    "descriptions": {
+      "excellent": "Professional studio quality, no issues detected",
+      "good": "High quality with minor imperfections",
+      "acceptable": "Usable quality with some issues",
+      "poor": "Low quality, significant issues detected",
+      "needs_review": "Uncertain classification, requires manual review"
+    },
+    "colors": {
+      "excellent": "#00FF00",
+      "good": "#7FFF00",
+      "acceptable": "#FFFF00",
+      "poor": "#FF7F00",
+      "needs_review": "#00FFFF"
+    }
+  },
+
+  "export": {
+    "_comment": "Export settings",
+    "formats": ["csv", "json", "xlsx"],
+    "default_format": "csv",
+    "include_features": true,
+    "include_metadata": true,
+    "include_predictions": true
+  },
+
+  "advanced": {
+    "_comment": "Advanced settings - modify with caution",
+    "atomic_writes": {
+      "_comment": "ARCHITECTURE.MD §3 - Atomic Weight Persistence",
+      "enabled": true,
+      "temp_suffix": ".tmp"
+    },
+    "connection_per_worker": {
+      "_comment": "ARCHITECTURE.MD §3 - Connection Scoping",
+      "enabled": true
+    },
+    "signal_queue_connection": {
+      "_comment": "ARCHITECTURE.MD §2 - Signal-Based Communication",
+      "type": "queued",
+      "_type_comment": "Qt.QueuedConnection enforced in code"
+    },
+    "cancellation_check_points": [
+      "after_load",
+      "after_dsp",
+      "after_spectral",
+      "after_ml",
+      "before_db"
+    ]
+  }
+}

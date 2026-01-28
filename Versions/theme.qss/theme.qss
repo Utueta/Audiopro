@@ -1,6 +1,0 @@
-QMainWindow { background-color: #0F111A; }
-#statusLabel { color: #00F2FF; font-size: 26px; font-weight: bold; padding: 15px; }
-QPushButton { background: #1A1D26; border: 1px solid #00F2FF; color: white; padding: 10px; border-radius: 4px; font-weight: bold; }
-QPushButton:hover { background: #00F2FF; color: #0F111A; }
-QTextEdit { background: #161922; color: #BBBBBB; border-radius: 5px; font-family: 'Consolas'; padding: 10px; }
-
